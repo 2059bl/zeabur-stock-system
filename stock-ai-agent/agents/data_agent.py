@@ -27,13 +27,19 @@ def _parse_twse(data: dict) -> Optional[dict]:
         return None
     last = data["data"][-1]
     try:
+        # TWSE columns: 0=date,1=volume(shares),2=amount,3=open,4=high,5=low,6=close,7=change(abs),8=transactions
+        close = float(last[6].replace(",", ""))
+        abs_change_str = last[7].replace(",", "").replace("+", "").replace("X", "").strip()
+        abs_change = float(abs_change_str) if abs_change_str else 0.0
+        prev_close = close - abs_change
+        change_pct = round(abs_change / prev_close * 100, 2) if prev_close != 0 else 0.0
         return {
             "open_price":  float(last[3].replace(",", "")),
             "high_price":  float(last[4].replace(",", "")),
             "low_price":   float(last[5].replace(",", "")),
-            "close_price": float(last[6].replace(",", "")),
-            "volume":      int(last[2].replace(",", "")) // 1000,
-            "change_pct":  float(last[8].replace(",", "").replace("X", "") or 0),
+            "close_price": close,
+            "volume":      int(last[1].replace(",", "")) // 1000,
+            "change_pct":  max(-99.99, min(99.99, change_pct)),
         }
     except (ValueError, IndexError) as e:
         logger.warning(f"TWSE 解析失敗: {e}")
@@ -48,13 +54,18 @@ def _parse_otc(data: dict) -> Optional[dict]:
     try:
         def clean(v):
             return str(v).replace(",", "").replace("--", "0").strip()
+        # OTC columns: 0=code,1=name,2=close,3=change(abs),4=open,5=high,6=low,7=avg,8=volume(shares)
+        close = float(clean(last[2]))
+        abs_change = float(clean(last[3]) or 0)
+        prev_close = close - abs_change
+        change_pct = round(abs_change / prev_close * 100, 2) if prev_close != 0 else 0.0
         return {
             "open_price":  float(clean(last[4])),
             "high_price":  float(clean(last[5])),
             "low_price":   float(clean(last[6])),
-            "close_price": float(clean(last[2])),
+            "close_price": close,
             "volume":      int(float(clean(last[8]))),
-            "change_pct":  float(clean(last[3]) or 0),
+            "change_pct":  max(-99.99, min(99.99, change_pct)),
         }
     except (ValueError, IndexError) as e:
         logger.warning(f"OTC 解析失敗: {e}")
