@@ -1,4 +1,4 @@
-from ..utils.db import fetch_all, execute
+from utils.db import fetch_all, execute
 
 
 async def detect_bull_trap(stock_code: str, trade_date: str) -> str:

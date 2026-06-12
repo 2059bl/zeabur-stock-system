@@ -3,7 +3,7 @@ import httpx
 import json
 import re
 import logging
-from ..utils.db import execute
+from utils.db import execute
 
 logger = logging.getLogger(__name__)
 

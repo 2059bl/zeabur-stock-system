@@ -1,6 +1,6 @@
 import logging
-from ..utils.db import fetch_all, execute
-from ..utils.indicators import compute_all
+from utils.db import fetch_all, execute
+from utils.indicators import compute_all
 
 logger = logging.getLogger(__name__)
 

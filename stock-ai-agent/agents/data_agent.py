@@ -6,8 +6,8 @@ import httpx
 import logging
 from typing import Optional
 
-from ..utils.db import execute
-from ..utils.finmind_client import fetch_institutional, fetch_margin
+from utils.db import execute
+from utils.finmind_client import fetch_institutional, fetch_margin
 
 logger = logging.getLogger(__name__)
 

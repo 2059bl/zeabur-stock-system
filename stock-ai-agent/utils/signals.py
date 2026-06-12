@@ -1,5 +1,5 @@
 from dataclasses import dataclass
-from .db import fetch_all
+from utils.db import fetch_all
 
 
 @dataclass
