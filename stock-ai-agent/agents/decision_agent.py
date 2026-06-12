@@ -3,6 +3,7 @@ import httpx
 import json
 import re
 import logging
+from datetime import date as _date
 from utils.db import execute
 
 logger = logging.getLogger(__name__)
@@ -44,13 +45,14 @@ async def run_cloud_decision(stock_code: str, trade_date: str, report_text: str)
                 clean = re.sub(r"```json?|```", "", raw).strip()
                 res = json.loads(clean)
 
+            td = _date.fromisoformat(trade_date)
             await execute("""
                 INSERT INTO ai_reports
                     (stock_code, report_date, report_type, agent_model,
                      cot_reasoning, final_score, recommendation, confidence)
                 VALUES ($1,$2,'DECISION',$3,$4,$5,$6,$7)
                 ON CONFLICT (stock_code, report_date, report_type) DO NOTHING
-            """, stock_code, trade_date, LLM_MODEL,
+            """, stock_code, td, LLM_MODEL,
                  res.get("cot_reasoning"), res.get("final_score"),
                  res.get("recommendation"), res.get("confidence"))
             return res

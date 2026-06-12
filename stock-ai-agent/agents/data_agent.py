@@ -4,6 +4,7 @@ data_agent — 日K報價 + FinMind 籌碼數據 抓取與寫入
 """
 import httpx
 import logging
+from datetime import date as _date
 from typing import Optional
 
 from utils.db import execute
@@ -85,6 +86,7 @@ async def upsert_daily_prices(stock_code: str, trade_date: str, market: str = "T
         logger.info(f"無報價數據: {stock_code} {trade_date}")
         return False
 
+    td = _date.fromisoformat(trade_date)
     await execute("""
         INSERT INTO stock_prices
             (stock_code, trade_date, open_price, high_price, low_price, close_price, volume, change_pct)
@@ -93,7 +95,7 @@ async def upsert_daily_prices(stock_code: str, trade_date: str, market: str = "T
             close_price = EXCLUDED.close_price,
             volume      = EXCLUDED.volume,
             change_pct  = EXCLUDED.change_pct
-    """, stock_code, trade_date,
+    """, stock_code, td,
          data["open_price"], data["high_price"], data["low_price"],
          data["close_price"], data["volume"], data["change_pct"])
     return True
@@ -111,12 +113,12 @@ async def upsert_chip_data(stock_code: str, trade_date: str) -> bool:
         logger.info(f"FinMind 無籌碼數據: {stock_code} {trade_date}")
         return False
 
-    # 確保 indicators 行存在（若 analysis 還沒跑，先插入空行）
+    td = _date.fromisoformat(trade_date)
     await execute("""
         INSERT INTO stock_indicators (stock_code, trade_date)
         VALUES ($1, $2)
         ON CONFLICT (stock_code, trade_date) DO NOTHING
-    """, stock_code, trade_date)
+    """, stock_code, td)
 
     if inst:
         await execute("""
@@ -131,7 +133,7 @@ async def upsert_chip_data(stock_code: str, trade_date: str) -> bool:
                 END,
                 updated_at = NOW()
             WHERE stock_code = $1 AND trade_date = $2
-        """, stock_code, trade_date,
+        """, stock_code, td,
              inst["foreign_net_buy"], inst["investment_trust_net_buy"], inst["dealer_net_buy"])
 
     if margin:
@@ -142,7 +144,7 @@ async def upsert_chip_data(stock_code: str, trade_date: str) -> bool:
                 short_to_margin_ratio = $5,
                 updated_at            = NOW()
             WHERE stock_code = $1 AND trade_date = $2
-        """, stock_code, trade_date,
+        """, stock_code, td,
              margin["margin_balance"], margin["margin_short_shares"], margin["short_to_margin_ratio"])
 
     return True

@@ -1,4 +1,5 @@
 import logging
+from datetime import date as _date
 from utils.db import fetch_all, execute
 from utils.indicators import compute_all
 
@@ -6,12 +7,13 @@ logger = logging.getLogger(__name__)
 
 
 async def run_analysis(stock_code: str, trade_date: str) -> dict:
+    td = _date.fromisoformat(trade_date)
     prices = await fetch_all("""
         SELECT close_price, high_price, low_price, open_price
         FROM stock_prices
         WHERE stock_code = $1 AND trade_date <= $2
         ORDER BY trade_date ASC LIMIT 150
-    """, stock_code, trade_date)
+    """, stock_code, td)
 
     if len(prices) < 20:
         return {"status": "insufficient_data", "stock_code": stock_code}
@@ -35,7 +37,7 @@ async def run_analysis(stock_code: str, trade_date: str) -> dict:
             bias_rate          = EXCLUDED.bias_rate,
             short_trend_confirmed = EXCLUDED.short_trend_confirmed,
             updated_at         = NOW()
-    """, stock_code, trade_date,
+    """, stock_code, td,
          ind["sma_5"], ind["sma_20"], ind["sma_60"], ind["sma_120"],
          ind["rsi_14"], ind["macd"], ind["macd_signal"], ind["macd_histogram"],
          ind["bias_rate"], ind["short_trend_confirmed"])
