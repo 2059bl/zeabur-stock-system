@@ -256,8 +256,8 @@ async def setup_webhook():
 
 
 _MIGRATION_V3 = """
-DROP VIEW IF EXISTS bear_strategy_candidates;
-DROP VIEW IF EXISTS latest_indicators;
+DROP VIEW IF EXISTS bear_strategy_candidates CASCADE;
+DROP VIEW IF EXISTS latest_indicators CASCADE;
 ALTER TABLE stock_indicators
     ADD COLUMN IF NOT EXISTS foreign_holding_ratio    NUMERIC(6,2),
     ADD COLUMN IF NOT EXISTS foreign_consecutive_days INT DEFAULT 0,
