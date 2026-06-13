@@ -16,6 +16,7 @@ from agents.bear_agent import run_dynamic_screening
 from agents.decision_agent import run_cloud_decision
 from utils.signals import compute_market_bear_signal
 from utils.notifier import send_telegram, get_chat_id
+from utils.chatbot import send_message, chat_with_llm, set_webhook
 from utils.db import execute, fetch_all, get_pool
 
 logging.basicConfig(
@@ -208,6 +209,105 @@ async def latest_reports():
 @app.get("/setup/telegram")
 async def setup_telegram():
     return await get_chat_id()
+
+
+@app.post("/setup/webhook")
+async def setup_webhook():
+    """向 Telegram 登記 Webhook，讓 bot 能接收訊息並回覆。"""
+    base = os.environ.get("SERVICE_URL", "https://twstock-agent-1781283629.zeabur.app")
+    result = await set_webhook(f"{base}/telegram/webhook")
+    return result
+
+
+@app.post("/telegram/webhook")
+async def telegram_webhook(update: dict, background_tasks: BackgroundTasks):
+    """Telegram 推送入口：接收訊息，在背景生成回覆。"""
+    background_tasks.add_task(_handle_telegram_update, update)
+    return {"ok": True}
+
+
+async def _handle_telegram_update(update: dict):
+    msg = update.get("message") or update.get("edited_message")
+    if not msg:
+        return
+
+    chat_id = str(msg["chat"]["id"])
+    text    = msg.get("text", "").strip()
+    if not text:
+        return
+
+    # ── 指令處理 ──────────────────────────────────────────────────────────
+    if text.startswith("/start") or text.startswith("/help"):
+        await send_message(chat_id, (
+            "👋 *台股 AI 量化助理*\n\n"
+            "你可以直接用中文問我問題，例如：\n"
+            "  「現在有哪些空頭股票？」\n"
+            "  「RSI 是什麼意思？」\n"
+            "  「台積電最新指標怎樣？」\n\n"
+            "📌 *快捷指令*\n"
+            "/stocks — 查看追蹤的 50 檔股票\n"
+            "/screen — 今日空頭候選\n"
+            "/run — 立即觸發今日分析\n"
+            "/help — 顯示此說明"
+        ))
+        return
+
+    if text.startswith("/stocks"):
+        rows = await fetch_all(
+            "SELECT stock_code, stock_name, market, sector FROM stocks WHERE is_active=TRUE ORDER BY sector, stock_code"
+        )
+        by_sector: dict = {}
+        for r in rows:
+            by_sector.setdefault(r["sector"] or "其他", []).append(f"{r['stock_code']} {r['stock_name']}")
+        lines = [f"📋 *追蹤股票（共 {len(rows)} 檔）*\n"]
+        for sector, codes in sorted(by_sector.items()):
+            lines.append(f"*{sector}*：{', '.join(codes)}")
+        await send_message(chat_id, "\n".join(lines))
+        return
+
+    if text.startswith("/screen"):
+        rows = await fetch_all("""
+            SELECT li.stock_code, s.stock_name, li.rsi_14, li.is_bear_alignment, li.institution_flow
+            FROM latest_indicators li JOIN stocks s ON s.stock_code=li.stock_code
+            WHERE li.is_bear_alignment=TRUE
+            ORDER BY li.rsi_14 ASC NULLS LAST LIMIT 15
+        """)
+        if not rows:
+            await send_message(chat_id, "今日無空頭排列標的。")
+        else:
+            lines = [f"🔻 *空頭候選（{len(rows)} 檔）*\n"]
+            for r in rows:
+                rsi = f"{r['rsi_14']:.1f}" if r.get("rsi_14") else "N/A"
+                lines.append(f"`{r['stock_code']}` {r['stock_name']}  RSI:{rsi}  法人:{r['institution_flow']}")
+            await send_message(chat_id, "\n".join(lines))
+        return
+
+    if text.startswith("/run"):
+        today = str(date.today())
+        await send_message(chat_id, f"⚙️ 已觸發 {today} 分析，約 1-2 分鐘後推播結果。")
+        await _pipeline_worker(today)
+        return
+
+    # ── 自由對話（LLM）─────────────────────────────────────────────────────
+    # 附上最新指標摘要作為 context
+    context_rows = await fetch_all("""
+        SELECT li.stock_code, s.stock_name, li.rsi_14, li.is_bear_alignment,
+               li.institution_flow, li.sma_5, li.sma_20
+        FROM latest_indicators li JOIN stocks s ON s.stock_code=li.stock_code
+        WHERE li.rsi_14 IS NOT NULL
+        ORDER BY li.rsi_14 ASC LIMIT 10
+    """)
+    if context_rows:
+        context = "目前 RSI 最低的 10 檔股票：\n" + "\n".join(
+            f"{r['stock_code']} {r['stock_name']}: RSI={r['rsi_14']:.1f}, "
+            f"空頭排列={r['is_bear_alignment']}, 法人={r['institution_flow']}"
+            for r in context_rows if r.get("rsi_14")
+        )
+    else:
+        context = None
+
+    reply = await chat_with_llm(text, context)
+    await send_message(chat_id, reply)
 
 
 @app.get("/logs")
