@@ -169,7 +169,7 @@ async def screen_stocks(
     sql = f"""
         SELECT
             li.stock_code, s.stock_name, s.market, s.sector,
-            li.trade_date, li.close_price,
+            li.trade_date,
             li.sma_5, li.sma_20, li.sma_60,
             li.rsi_14, li.macd_histogram, li.bias_rate,
             li.is_bear_alignment, li.short_trend_confirmed,
