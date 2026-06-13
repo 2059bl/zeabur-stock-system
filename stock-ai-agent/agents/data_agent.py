@@ -8,8 +8,11 @@ import datetime
 from datetime import date as _date
 from typing import Optional
 
-from utils.db import execute
-from utils.finmind_client import fetch_institutional, fetch_margin
+from utils.db import execute, fetch_all
+from utils.finmind_client import (
+    fetch_institutional, fetch_margin,
+    fetch_shareholding, fetch_consecutive_foreign_days,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -174,15 +177,52 @@ async def backfill_prices(stock_code: str, days: int = 90) -> int:
         return 0
 
 
+async def _calc_short_cover_days(stock_code: str, trade_date: str, short_shares: int) -> float | None:
+    """融券回補預估天數 = 融券餘額 / 近5日均量。"""
+    if short_shares <= 0:
+        return None
+    td = _date.fromisoformat(trade_date)
+    rows = await fetch_all("""
+        SELECT volume FROM stock_prices
+        WHERE stock_code = $1 AND trade_date <= $2
+        ORDER BY trade_date DESC LIMIT 5
+    """, stock_code, td)
+    if not rows:
+        return None
+    avg_vol = sum(float(r["volume"] or 0) for r in rows) / len(rows)
+    if avg_vol <= 0:
+        return None
+    return round(short_shares / avg_vol, 1)
+
+
+async def _calc_margin_trend_5d(stock_code: str, trade_date: str) -> float | None:
+    """5日融資餘額變化百分比 = (今日 - 5日前) / 5日前 * 100。"""
+    td = _date.fromisoformat(trade_date)
+    rows = await fetch_all("""
+        SELECT margin_balance FROM stock_indicators
+        WHERE stock_code = $1 AND trade_date <= $2 AND margin_balance IS NOT NULL
+        ORDER BY trade_date DESC LIMIT 6
+    """, stock_code, td)
+    if len(rows) < 2:
+        return None
+    latest = float(rows[0]["margin_balance"])
+    prev   = float(rows[-1]["margin_balance"])
+    if prev == 0:
+        return None
+    return round((latest - prev) / prev * 100, 2)
+
+
 async def upsert_chip_data(stock_code: str, trade_date: str) -> bool:
     """
-    從 FinMind 抓取當日三大法人 + 融資融券，寫入 stock_indicators。
+    從 FinMind 抓取三大法人、融資融券、外資持股比例，寫入 stock_indicators。
     需在 run_analysis 後執行（確保 indicators 行已存在）。
     """
-    inst   = await fetch_institutional(stock_code, trade_date)
-    margin = await fetch_margin(stock_code, trade_date)
+    inst         = await fetch_institutional(stock_code, trade_date)
+    margin       = await fetch_margin(stock_code, trade_date)
+    shareholding = await fetch_shareholding(stock_code, trade_date)
+    consec_days  = await fetch_consecutive_foreign_days(stock_code, trade_date)
 
-    if not inst and not margin:
+    if not inst and not margin and not shareholding:
         logger.info(f"FinMind 無籌碼數據: {stock_code} {trade_date}")
         return False
 
@@ -199,6 +239,7 @@ async def upsert_chip_data(stock_code: str, trade_date: str) -> bool:
                 foreign_net_buy          = $3,
                 investment_trust_net_buy = $4,
                 dealer_net_buy           = $5,
+                foreign_consecutive_days = $6,
                 institution_flow = CASE
                     WHEN $3 < 0 AND $4 < 0 THEN 'DOUBLE_SELL'::institution_flow_type
                     WHEN $3 < 0 OR  $4 < 0 THEN 'SINGLE_SELL'::institution_flow_type
@@ -207,17 +248,32 @@ async def upsert_chip_data(stock_code: str, trade_date: str) -> bool:
                 updated_at = NOW()
             WHERE stock_code = $1 AND trade_date = $2
         """, stock_code, td,
-             inst["foreign_net_buy"], inst["investment_trust_net_buy"], inst["dealer_net_buy"])
+             inst["foreign_net_buy"], inst["investment_trust_net_buy"],
+             inst["dealer_net_buy"], consec_days)
 
     if margin:
+        short_shares = margin["margin_short_shares"]
+        short_cover  = await _calc_short_cover_days(stock_code, trade_date, short_shares)
+        margin_trend = await _calc_margin_trend_5d(stock_code, trade_date)
         await execute("""
             UPDATE stock_indicators SET
                 margin_balance        = $3,
                 margin_short_shares   = $4,
                 short_to_margin_ratio = $5,
+                short_cover_days      = $6,
+                margin_trend_5d       = $7,
                 updated_at            = NOW()
             WHERE stock_code = $1 AND trade_date = $2
         """, stock_code, td,
-             margin["margin_balance"], margin["margin_short_shares"], margin["short_to_margin_ratio"])
+             margin["margin_balance"], short_shares,
+             margin["short_to_margin_ratio"], short_cover, margin_trend)
+
+    if shareholding and shareholding.get("foreign_holding_ratio") is not None:
+        await execute("""
+            UPDATE stock_indicators SET
+                foreign_holding_ratio = $3,
+                updated_at            = NOW()
+            WHERE stock_code = $1 AND trade_date = $2
+        """, stock_code, td, shareholding["foreign_holding_ratio"])
 
     return True
