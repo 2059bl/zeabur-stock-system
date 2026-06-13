@@ -18,6 +18,12 @@ async def run_analysis(stock_code: str, trade_date: str) -> dict:
     if len(prices) < 20:
         return {"status": "insufficient_data", "stock_code": stock_code}
 
+    # asyncpg 回傳 Decimal，需轉 float 給 numpy
+    for row in prices:
+        for k in ("close_price", "high_price", "low_price", "open_price"):
+            if row.get(k) is not None:
+                row[k] = float(row[k])
+
     ind = compute_all(prices)
 
     await execute("""
