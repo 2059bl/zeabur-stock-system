@@ -12,7 +12,7 @@ logger = logging.getLogger(__name__)
 
 FINMIND_TOKEN = os.environ.get(
     "FINMIND_API_KEY",
-    "eyJOeXAiOiJKV1QiLCJhbGciOiJIUzl1Nij9.eyJ1c2VyX2lkljoiTGkgbmluzylslmVtYWIsljoiMjA1OWJsQGdtYWlsLmNvbSIsInRva2VuX3ZlcnNpb24iOjB9.LqOpJ6_2UuEyGzuvBUtosDXW1kTJzlu2PtMjbamsRU",
+    "eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJ1c2VyX2lkIjoiTGkgbmluZyIsImVtYWlsIjoiMjA1OWJsQGdtYWlsLmNvbSIsInRva2VuX3ZlcnNpb24iOjB9.LqOpJ6__2UuEyGzuvBUtosDXW1kTJzIu2PtMjbamsRU",
 )
 _BASE = "https://api.finmindtrade.com/api/v4/data"
 
