@@ -90,14 +90,27 @@ def _parse_yahoo(data: dict, target_date: str) -> Optional[dict]:
         return None
 
 
+async def _yahoo_get(client: httpx.AsyncClient, stock_code: str) -> Optional[dict]:
+    """嘗試 .TW 後綴，若無資料改用 .TWO（部分上櫃股票格式不同）。"""
+    for suffix in (".TW", ".TWO"):
+        ticker = f"{stock_code}{suffix}"
+        try:
+            r = await client.get(_YAHOO_URL.format(ticker=ticker))
+            data = r.json()
+            if data.get("chart", {}).get("result"):
+                return data
+        except Exception:
+            pass
+    return None
+
+
 async def fetch_price(stock_code: str, trade_date: str, market: str = "TWSE") -> Optional[dict]:
     date_fmt = trade_date.replace("-", "")
     try:
         async with httpx.AsyncClient(timeout=15, headers=_YAHOO_HEADERS) as c:
             if market == "OTC":
-                ticker = f"{stock_code}.TW"
-                r = await c.get(_YAHOO_URL.format(ticker=ticker))
-                return _parse_yahoo(r.json(), trade_date)
+                data = await _yahoo_get(c, stock_code)
+                return _parse_yahoo(data, trade_date) if data else None
             else:
                 r = await c.get(_TWSE_URL.format(date=date_fmt, code=stock_code))
                 return _parse_twse(r.json())
@@ -131,15 +144,21 @@ async def upsert_daily_prices(stock_code: str, trade_date: str, market: str = "T
 async def backfill_prices(stock_code: str, days: int = 90) -> int:
     """
     用 Yahoo Finance 一次補抓 N 天歷史 K 線，寫入 stock_prices。
-    回傳成功寫入的天數。
+    自動嘗試 .TW / .TWO 後綴。回傳成功寫入的天數。
     """
-    ticker = f"{stock_code}.TW"
-    url = _YAHOO_HIST_URL.format(ticker=ticker, days=days)
+    result = None
+    async with httpx.AsyncClient(timeout=20, headers=_YAHOO_HEADERS) as c:
+        for suffix in (".TW", ".TWO"):
+            ticker = f"{stock_code}{suffix}"
+            url = _YAHOO_HIST_URL.format(ticker=ticker, days=days)
+            try:
+                r = await c.get(url)
+                result = r.json().get("chart", {}).get("result")
+                if result:
+                    break
+            except Exception:
+                pass
     try:
-        async with httpx.AsyncClient(timeout=20, headers=_YAHOO_HEADERS) as c:
-            r = await c.get(url)
-            data = r.json()
-        result = data.get("chart", {}).get("result")
         if not result:
             logger.warning(f"Yahoo 無歷史資料: {stock_code}")
             return 0
