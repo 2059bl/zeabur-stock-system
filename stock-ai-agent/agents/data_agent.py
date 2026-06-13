@@ -1,9 +1,10 @@
 """
 data_agent — 日K報價 + FinMind 籌碼數據 抓取與寫入
-支援 TWSE（上市）與 OTC（上櫃）雙來源自動切換。
+TWSE（上市）用官方 API；OTC（上櫃）改用 Yahoo Finance（TPEx 舊 API 已下架）。
 """
 import httpx
 import logging
+import datetime
 from datetime import date as _date
 from typing import Optional
 
@@ -16,10 +17,8 @@ _TWSE_URL = (
     "https://www.twse.com.tw/exchangeReport/STOCK_DAY"
     "?response=json&date={date}&stockNo={code}"
 )
-_OTC_URL = (
-    "https://www.tpex.org.tw/web/stock/aftertrading/daily_close_quotes/"
-    "stk_close_download.php?d={date_slash}&q={code}&s=0,asc,0&o=json"
-)
+_YAHOO_URL = "https://query1.finance.yahoo.com/v8/finance/chart/{ticker}?interval=1d&range=10d"
+_YAHOO_HEADERS = {"User-Agent": "Mozilla/5.0 (compatible; StockBot/1.0)"}
 
 
 def _parse_twse(data: dict) -> Optional[dict]:
@@ -27,7 +26,7 @@ def _parse_twse(data: dict) -> Optional[dict]:
         return None
     last = data["data"][-1]
     try:
-        # TWSE columns: 0=date,1=volume(shares),2=amount,3=open,4=high,5=low,6=close,7=change(abs),8=transactions
+        # columns: 0=date,1=volume(shares),2=amount,3=open,4=high,5=low,6=close,7=change(abs),8=transactions
         close = float(last[6].replace(",", ""))
         abs_change_str = last[7].replace(",", "").replace("+", "").replace("X", "").strip()
         abs_change = float(abs_change_str) if abs_change_str else 0.0
@@ -46,42 +45,55 @@ def _parse_twse(data: dict) -> Optional[dict]:
         return None
 
 
-def _parse_otc(data: dict) -> Optional[dict]:
-    records = data.get("aaData") or []
-    if not records:
-        return None
-    last = records[-1]
+def _parse_yahoo(data: dict, target_date: str) -> Optional[dict]:
+    """從 Yahoo Finance v8 chart API 取指定日期的 OHLCV。"""
     try:
-        def clean(v):
-            return str(v).replace(",", "").replace("--", "0").strip()
-        # OTC columns: 0=code,1=name,2=close,3=change(abs),4=open,5=high,6=low,7=avg,8=volume(shares)
-        close = float(clean(last[2]))
-        abs_change = float(clean(last[3]) or 0)
-        prev_close = close - abs_change
-        change_pct = round(abs_change / prev_close * 100, 2) if prev_close != 0 else 0.0
-        return {
-            "open_price":  float(clean(last[4])),
-            "high_price":  float(clean(last[5])),
-            "low_price":   float(clean(last[6])),
-            "close_price": close,
-            "volume":      int(float(clean(last[8]))),
-            "change_pct":  max(-99.99, min(99.99, change_pct)),
-        }
-    except (ValueError, IndexError) as e:
-        logger.warning(f"OTC 解析失敗: {e}")
+        result = data["chart"]["result"]
+        if not result:
+            return None
+        r = result[0]
+        timestamps = r["timestamp"]
+        quote = r["indicators"]["quote"][0]
+        opens = quote["open"]
+        highs = quote["high"]
+        lows = quote["low"]
+        closes = quote["close"]
+        volumes = quote["volume"]
+
+        target = _date.fromisoformat(target_date)
+        for i, ts in enumerate(timestamps):
+            day = datetime.date.fromtimestamp(ts)
+            if day == target:
+                o = opens[i] or 0
+                h = highs[i] or 0
+                l = lows[i] or 0
+                c = closes[i] or 0
+                v = volumes[i] or 0
+                prev = closes[i - 1] if i > 0 and closes[i - 1] else c
+                change_pct = round((c - prev) / prev * 100, 2) if prev else 0.0
+                return {
+                    "open_price":  round(o, 2),
+                    "high_price":  round(h, 2),
+                    "low_price":   round(l, 2),
+                    "close_price": round(c, 2),
+                    "volume":      int(v) // 1000,
+                    "change_pct":  max(-99.99, min(99.99, change_pct)),
+                }
+        logger.info(f"Yahoo Finance 無 {target_date} 資料（可能休市）")
+        return None
+    except (KeyError, IndexError, TypeError) as e:
+        logger.warning(f"Yahoo Finance 解析失敗: {e}")
         return None
 
 
 async def fetch_price(stock_code: str, trade_date: str, market: str = "TWSE") -> Optional[dict]:
     date_fmt = trade_date.replace("-", "")
     try:
-        async with httpx.AsyncClient(timeout=15) as c:
+        async with httpx.AsyncClient(timeout=15, headers=_YAHOO_HEADERS) as c:
             if market == "OTC":
-                parts = trade_date.split("-")
-                tw_year = int(parts[0]) - 1911
-                date_slash = f"{tw_year}/{parts[1]}"
-                r = await c.get(_OTC_URL.format(date_slash=date_slash, code=stock_code))
-                return _parse_otc(r.json())
+                ticker = f"{stock_code}.TW"
+                r = await c.get(_YAHOO_URL.format(ticker=ticker))
+                return _parse_yahoo(r.json(), trade_date)
             else:
                 r = await c.get(_TWSE_URL.format(date=date_fmt, code=stock_code))
                 return _parse_twse(r.json())
