@@ -602,14 +602,19 @@ async def _handle_telegram_update(update: dict):
         ORDER BY li.composite_score DESC LIMIT 10
     """)
     if context_rows:
-        context = "目前綜合評分最高的 10 檔股票：\n" + "\n".join(
-            f"{r['stock_code']} {r['stock_name']}: 評分={r.get('composite_score') or 0:.0f}, "
-            f"RSI={r['rsi_14']:.1f if r.get('rsi_14') else 'N/A'}, "
-            f"空頭排列={r['is_bear_alignment']}, 法人={r['institution_flow']}, "
-            f"外資連續={r.get('foreign_consecutive_days') or 0}日, "
-            f"外資持股={r.get('foreign_holding_ratio') or 0:.1f}%"
-            for r in context_rows if r.get("rsi_14")
-        )
+        lines = []
+        for r in context_rows:
+            if not r.get("rsi_14"):
+                continue
+            rsi_str  = f"{float(r['rsi_14']):.1f}"
+            sc_str   = f"{float(r['composite_score']):.0f}" if r.get("composite_score") else "—"
+            hold_str = f"{float(r['foreign_holding_ratio']):.1f}" if r.get("foreign_holding_ratio") else "—"
+            lines.append(
+                f"{r['stock_code']} {r['stock_name']}: 評分={sc_str}, "
+                f"RSI={rsi_str}, 空頭排列={r['is_bear_alignment']}, 法人={r['institution_flow']}, "
+                f"外資連續={r.get('foreign_consecutive_days') or 0}日, 外資持股={hold_str}%"
+            )
+        context = "目前綜合評分最高的 10 檔股票：\n" + "\n".join(lines) if lines else None
     else:
         context = None
 
