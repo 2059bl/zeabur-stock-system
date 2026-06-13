@@ -292,7 +292,7 @@ CREATE TABLE IF NOT EXISTS backtest_results (
     details         JSONB,
     created_at      TIMESTAMPTZ DEFAULT NOW()
 );
-CREATE OR REPLACE VIEW latest_indicators AS
+CREATE VIEW latest_indicators AS
 SELECT DISTINCT ON (i.stock_code)
     i.*, s.stock_name, s.sector, s.industry,
     CASE WHEN i.sma_5 < i.sma_20 AND i.sma_20 < i.sma_60 THEN TRUE ELSE FALSE END AS is_bear_alignment,
@@ -304,7 +304,7 @@ SELECT DISTINCT ON (i.stock_code)
 FROM stock_indicators i
 JOIN stocks s ON s.stock_code = i.stock_code
 ORDER BY i.stock_code, i.trade_date DESC;
-CREATE OR REPLACE VIEW bear_strategy_candidates AS
+CREATE VIEW bear_strategy_candidates AS
 SELECT
     li.*, ar.final_score AS ai_score, ar.recommendation AS ai_recommendation,
     ar.cot_reasoning AS ai_reasoning, mi.market_signal_score, mi.market_signal_level
