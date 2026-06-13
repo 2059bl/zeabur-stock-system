@@ -10,7 +10,7 @@ from pydantic import BaseModel
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 
-from agents.data_agent import upsert_daily_prices, upsert_chip_data
+from agents.data_agent import upsert_daily_prices, upsert_chip_data, backfill_prices
 from agents.analysis_agent import run_analysis, generate_text_report
 from agents.bear_agent import run_dynamic_screening
 from agents.decision_agent import run_cloud_decision
@@ -215,6 +215,36 @@ async def workflow_logs():
     return await fetch_all(
         "SELECT * FROM workflow_logs ORDER BY started_at DESC LIMIT 20"
     )
+
+
+@app.post("/backfill")
+async def backfill(
+    days: int = Query(90, le=365, description="回填天數"),
+    background_tasks: BackgroundTasks = None,
+):
+    """
+    用 Yahoo Finance 補抓所有追蹤股票的歷史 K 線，讓技術指標有足夠資料計算。
+    days=90 約需 1-2 分鐘，在背景執行。
+    """
+    background_tasks.add_task(_backfill_worker, days)
+    return {"status": "回填已排入背景", "days": days}
+
+
+async def _backfill_worker(days: int):
+    stocks = await fetch_all("SELECT stock_code FROM stocks WHERE is_active = TRUE")
+    sem = asyncio.Semaphore(6)
+    results = await asyncio.gather(*[
+        _run_with_semaphore(sem, backfill_prices(s["stock_code"], days))
+        for s in stocks
+    ])
+    total = sum(results)
+    logger.info(f"[Backfill] 完成，共寫入 {total} 筆歷史報價")
+
+    # 回填完後重跑最新一天的指標
+    latest_date = str(date.today())
+    for s in stocks:
+        await run_analysis(s["stock_code"], latest_date)
+    logger.info("[Backfill] 技術指標重算完畢")
 
 
 # ─── Pipeline ─────────────────────────────────────────────────────────────────

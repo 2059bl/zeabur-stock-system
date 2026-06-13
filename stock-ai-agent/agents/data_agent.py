@@ -17,7 +17,8 @@ _TWSE_URL = (
     "https://www.twse.com.tw/exchangeReport/STOCK_DAY"
     "?response=json&date={date}&stockNo={code}"
 )
-_YAHOO_URL = "https://query1.finance.yahoo.com/v8/finance/chart/{ticker}?interval=1d&range=10d"
+_YAHOO_URL      = "https://query1.finance.yahoo.com/v8/finance/chart/{ticker}?interval=1d&range=10d"
+_YAHOO_HIST_URL = "https://query1.finance.yahoo.com/v8/finance/chart/{ticker}?interval=1d&range={days}d"
 _YAHOO_HEADERS = {"User-Agent": "Mozilla/5.0 (compatible; StockBot/1.0)"}
 
 
@@ -122,6 +123,55 @@ async def upsert_daily_prices(stock_code: str, trade_date: str, market: str = "T
          data["open_price"], data["high_price"], data["low_price"],
          data["close_price"], data["volume"], data["change_pct"])
     return True
+
+
+async def backfill_prices(stock_code: str, days: int = 90) -> int:
+    """
+    用 Yahoo Finance 一次補抓 N 天歷史 K 線，寫入 stock_prices。
+    回傳成功寫入的天數。
+    """
+    ticker = f"{stock_code}.TW"
+    url = _YAHOO_HIST_URL.format(ticker=ticker, days=days)
+    try:
+        async with httpx.AsyncClient(timeout=20, headers=_YAHOO_HEADERS) as c:
+            r = await c.get(url)
+            data = r.json()
+        result = data.get("chart", {}).get("result")
+        if not result:
+            logger.warning(f"Yahoo 無歷史資料: {stock_code}")
+            return 0
+        res = result[0]
+        timestamps = res["timestamp"]
+        q = res["indicators"]["quote"][0]
+        opens = q["open"]; highs = q["high"]; lows = q["low"]
+        closes = q["close"]; volumes = q["volume"]
+
+        written = 0
+        for i, ts in enumerate(timestamps):
+            c_val = closes[i]
+            if not c_val:
+                continue
+            day = datetime.date.fromtimestamp(ts)
+            prev = closes[i - 1] if i > 0 and closes[i - 1] else c_val
+            change_pct = round((c_val - prev) / prev * 100, 2) if prev else 0.0
+            await execute("""
+                INSERT INTO stock_prices
+                    (stock_code, trade_date, open_price, high_price, low_price, close_price, volume, change_pct)
+                VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
+                ON CONFLICT (stock_code, trade_date) DO UPDATE SET
+                    close_price = EXCLUDED.close_price,
+                    volume      = EXCLUDED.volume,
+                    change_pct  = EXCLUDED.change_pct
+            """, stock_code, day,
+                 round(opens[i] or 0, 2), round(highs[i] or 0, 2),
+                 round(lows[i] or 0, 2), round(c_val, 2),
+                 int(volumes[i] or 0) // 1000,
+                 max(-99.99, min(99.99, change_pct)))
+            written += 1
+        return written
+    except Exception as e:
+        logger.warning(f"回填失敗 {stock_code}: {e}")
+        return 0
 
 
 async def upsert_chip_data(stock_code: str, trade_date: str) -> bool:
