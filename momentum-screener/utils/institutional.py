@@ -46,6 +46,11 @@ async def fetch_institutional_flows(stock_code: str, trade_date: datetime.date) 
         "TaiwanStockInstitutionalInvestorsBuySell",
         stock_code, start, trade_date
     )
+    # 若今日無資料（市場仍開盤中），自動 fallback 至最近一個有資料的日期
+    if records:
+        latest_date = max(r.get("date", "") for r in records)
+        if latest_date != str(trade_date):
+            trade_date = datetime.date.fromisoformat(latest_date)
 
     result = {
         "foreign_buy":   0,
@@ -57,24 +62,29 @@ async def fetch_institutional_flows(stock_code: str, trade_date: datetime.date) 
         "foreign_consec": 0,
     }
 
-    # 按日期整理
+    # FinMind 欄位名稱（英文）：
+    # Foreign_Investor / Foreign_Dealer_Self → 外資
+    # Investment_Trust                        → 投信
+    # Dealer_self / Dealer_Hedging            → 自營商
+    # 單位：股 → 除以 1000 換算為 張
+
     by_date: dict[str, dict] = {}
     for rec in records:
         d = rec.get("date", "")
         if d not in by_date:
             by_date[d] = {"foreign": 0, "trust": 0, "dealer": 0}
         name = rec.get("name", "")
-        buy  = int(rec.get("buy",  0) or 0)
-        sell = int(rec.get("sell", 0) or 0)
+        buy  = int(rec.get("buy",  0) or 0) // 1000   # 股 → 張
+        sell = int(rec.get("sell", 0) or 0) // 1000
         net  = buy - sell
-        if "外資" in name and "自行" not in name:
+        if name in ("Foreign_Investor", "Foreign_Dealer_Self"):
             by_date[d]["foreign"] += net
-            if d == str(trade_date):
+            if d == str(trade_date) and name == "Foreign_Investor":
                 result["foreign_buy"]  = buy
                 result["foreign_sell"] = sell
-        elif "投信" in name:
+        elif name == "Investment_Trust":
             by_date[d]["trust"] += net
-        elif "自營" in name:
+        elif name in ("Dealer_self", "Dealer_Hedging"):
             by_date[d]["dealer"] += net
 
     # 今日合計
@@ -118,15 +128,19 @@ async def fetch_foreign_shareholding(stock_code: str) -> dict:
         return {}
 
     latest = records[-1]
-    total  = float(latest.get("TotalIssuedShares", 1) or 1)
-    foreign_shares = float(latest.get("ForeignInvestmentShares", 0) or 0)
-    ratio  = float(latest.get("ForeignInvestmentSharesRatio", 0) or 0)
+    total          = int(latest.get("NumberOfSharesIssued", 0) or 0)
+    foreign_shares = int(latest.get("ForeignInvestmentShares", 0) or 0)
+    ratio          = float(latest.get("ForeignInvestmentSharesRatio", 0) or 0)
+    remain_ratio   = float(latest.get("ForeignInvestmentRemainRatio", 0) or 0)
+    upper_limit    = float(latest.get("ForeignInvestmentUpperLimitRatio", 0) or 0)
 
     return {
-        "date":          latest.get("date"),
-        "foreign_ratio": round(ratio, 2),
-        "foreign_shares": int(foreign_shares),
-        "total_shares":   int(total),
+        "date":              latest.get("date"),
+        "foreign_ratio":     round(ratio, 2),          # 外資持股比例 %
+        "foreign_remain_ratio": round(remain_ratio, 2), # 外資剩餘可買比例 %
+        "foreign_upper_limit":  round(upper_limit, 2),  # 外資持股上限 %
+        "foreign_shares":    foreign_shares,            # 外資持股（股）
+        "total_shares":      total,                     # 發行股數（股）
     }
 
 
@@ -143,9 +157,9 @@ async def fetch_consecutive_foreign_days(stock_code: str,
     for rec in records:
         d    = rec.get("date", "")
         name = rec.get("name", "")
-        if "外資" in name and "自行" not in name:
-            buy  = int(rec.get("buy",  0) or 0)
-            sell = int(rec.get("sell", 0) or 0)
+        if name in ("Foreign_Investor", "Foreign_Dealer_Self"):
+            buy  = int(rec.get("buy",  0) or 0) // 1000
+            sell = int(rec.get("sell", 0) or 0) // 1000
             by_date[d] = by_date.get(d, 0) + (buy - sell)
 
     consec = 0
