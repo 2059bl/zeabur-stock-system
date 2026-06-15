@@ -411,6 +411,118 @@ async def bot_info():
     return await get_me()
 
 
+# ── 診斷端點 ──────────────────────────────────────────────────────────────────
+
+@app.get("/debug/screen")
+async def debug_screen(
+    trade_date: Optional[str] = Query(None),
+    stock_code: Optional[str] = Query(None, description="指定股票代號，空白則全部"),
+):
+    """逐 filter 診斷，回傳每檔股票在哪個 Step 被過濾掉。"""
+    from utils.price_fetcher import fetch_stock_data, fetch_market_return
+    from agents.screener import CFG, _rsi
+
+    _tz = datetime.timezone(datetime.timedelta(hours=8))
+    td = datetime.date.fromisoformat(trade_date) if trade_date else datetime.datetime.now(_tz).date()
+
+    stocks = await fetch_all(
+        "SELECT stock_code, stock_name, market, sector, shares_outstanding, float_shares "
+        "FROM stocks WHERE is_active=TRUE" + (" AND stock_code=$1" if stock_code else ""),
+        *([stock_code] if stock_code else [])
+    )
+
+    market_return = await fetch_market_return(td)
+
+    import asyncio
+    sem = asyncio.Semaphore(5)
+    async def _fetch(s):
+        async with sem:
+            return s, await fetch_stock_data(s["stock_code"])
+
+    raw = await asyncio.gather(*[_fetch(s) for s in stocks])
+
+    report = []
+    for stock, data in raw:
+        code = stock["stock_code"]
+        name = stock["stock_name"]
+
+        if data is None:
+            report.append({"code": code, "name": name, "fail": "no_data", "data": None})
+            continue
+
+        ret        = data["daily_return"]
+        vol_ratio  = data["volume_ratio"]
+        closes     = data["closes"]
+        vols_3d    = data["volumes_3d"]
+        price      = data["close"]
+        ma5, ma10, ma20, ma60 = data["ma5"], data["ma10"], data["ma20"], data["ma60"]
+        float_sh   = stock.get("float_shares") or stock.get("shares_outstanding")
+        volume_today = data["volume_today"]
+        turnover   = (volume_today / float_sh) if (float_sh and float_sh > 0 and volume_today > 0) else None
+        float_mktcap = price * (float_sh or 0)
+        rsi_val    = _rsi(closes)
+
+        fail = None
+        if not (CFG["return_min"] <= ret <= CFG["return_max"]):
+            fail = f"step1_return({ret*100:.2f}%,要3-5%)"
+        elif vol_ratio is None or vol_ratio < CFG["vol_ratio_min"]:
+            fail = f"step2_vol_ratio({vol_ratio},要>{CFG['vol_ratio_min']})"
+        elif turnover is not None and not (CFG["turnover_min"] <= turnover <= CFG["turnover_max"]):
+            fail = f"step3_turnover({turnover*100:.2f}%,要5-10%)"
+        elif float_sh and not (CFG["mktcap_min"] <= float_mktcap <= CFG["mktcap_max"]):
+            fail = f"step4_mktcap({float_mktcap/1e9:.0f}億,要250-2500億)"
+        elif len(vols_3d) == 3:
+            v0, v1, v2 = vols_3d
+            tol = CFG["vol_slope_tolerance"]
+            if not ((v1 >= v0*(1-tol)) and (v2 >= v1*(1-tol)) and (v2 > v0)):
+                fail = f"step5_vol_slope(vols={v0},{v1},{v2})"
+        if fail is None and None in (ma5, ma10, ma20):
+            fail = f"step6a_ma_none(ma5={ma5},ma10={ma10},ma20={ma20})"
+        elif fail is None and not (price > ma5 > ma10 > ma20):
+            fail = f"step6a_ma_order(p={price:.1f}>ma5={ma5:.1f}>ma10={ma10:.1f}>ma20={ma20:.1f}?)"
+        elif fail is None and (ma60 and ma20 <= ma60):
+            fail = f"step6a_ma60(ma20={ma20:.1f}<=ma60={ma60:.1f})"
+        elif fail is None:
+            slopes_ok = all(s is not None and s > CFG["ma_slope_min"]
+                            for s in (data["ma5_slope"], data["ma10_slope"], data["ma20_slope"]))
+            if not slopes_ok:
+                fail = f"step6b_slope({data['ma5_slope']:.4f},{data['ma10_slope']:.4f},{data['ma20_slope']:.4f})"
+        if fail is None and rsi_val is not None and rsi_val >= CFG["rsi_max"]:
+            fail = f"step6c_rsi({rsi_val:.1f}>={CFG['rsi_max']})"
+        if fail is None:
+            rel = ret - market_return
+            if rel <= 0:
+                fail = f"step7_rel_strength({rel*100:.2f}%<=0)"
+
+        report.append({
+            "code": code, "name": name,
+            "fail": fail or "PASS",
+            "ret_pct": round(ret*100, 2),
+            "vol_ratio": round(vol_ratio, 2) if vol_ratio else None,
+            "mktcap_bn": round(float_mktcap/1e9, 1) if float_sh else None,
+            "rsi": round(rsi_val, 1) if rsi_val else None,
+            "data_days": len(closes),
+            "ma5": round(ma5,2) if ma5 else None,
+            "ma20": round(ma20,2) if ma20 else None,
+        })
+
+    passed  = [r for r in report if r["fail"] == "PASS"]
+    by_step = {}
+    for r in report:
+        if r["fail"] != "PASS":
+            step = r["fail"].split("(")[0]
+            by_step[step] = by_step.get(step, 0) + 1
+
+    return {
+        "trade_date": str(td),
+        "market_return_pct": round(market_return*100, 2),
+        "total": len(report),
+        "passed": len(passed),
+        "filter_stats": by_step,
+        "details": sorted(report, key=lambda x: (x["fail"] != "PASS", x["fail"])),
+    }
+
+
 # ── Dashboard ─────────────────────────────────────────────────────────────────
 
 @app.get("/dashboard", response_class=HTMLResponse)
