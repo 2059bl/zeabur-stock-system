@@ -397,10 +397,11 @@ async def trigger_momentum(req: RunRequest, background_tasks: BackgroundTasks):
 @app.get("/momentum/candidates")
 async def momentum_candidates(screen_date: Optional[str] = Query(None, description="YYYY-MM-DD，預設今日")):
     """查看指定日期的動量候選股。"""
-    td = screen_date or str(date.today())
+    from datetime import date as _date
+    td = _date.fromisoformat(screen_date) if screen_date else date.today()
     return await fetch_all("""
         SELECT * FROM momentum_candidates
-        WHERE screen_date = $1::date
+        WHERE screen_date = $1
         ORDER BY rank ASC
     """, td)
 
@@ -785,11 +786,11 @@ async def _handle_telegram_update(update: dict):
         return
 
     if text.startswith("/momentum"):
-        today = str(date.today())
+        today = date.today()
         rows = await fetch_all("""
             SELECT rank, stock_code, stock_name, daily_return, volume_ratio,
                    relative_strength, momentum_score, market_cap_bn
-            FROM momentum_candidates WHERE screen_date = $1::date ORDER BY rank ASC
+            FROM momentum_candidates WHERE screen_date = $1 ORDER BY rank ASC
         """, today)
         if not rows:
             await send_message(chat_id,
