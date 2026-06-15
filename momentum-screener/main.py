@@ -997,7 +997,7 @@ async def dashboard():
     now_str = datetime.datetime.now(_tz).strftime("%Y-%m-%d %H:%M")
 
     # ── 資料並行抓取 ────────────────────────────────────────────────────────────
-    results, logs, inst_rows, stocks_all, exdiv_events = await asyncio.gather(
+    results, logs, inst_rows, stocks_all = await asyncio.gather(
         fetch_all("""
             SELECT rank, stock_code, stock_name, sector,
                    ROUND((daily_return*100)::numeric,2)    AS ret_pct,
@@ -1025,16 +1025,20 @@ async def dashboard():
             WHERE i.trade_date = (SELECT MAX(trade_date) FROM institutional_daily)
               AND s.is_active = TRUE
             ORDER BY ABS(i.foreign_net) DESC
-            LIMIT 15
+            LIMIT 20
         """),
         fetch_all("SELECT stock_code FROM stocks WHERE is_active=TRUE"),
-        fetch_all("SELECT 1"),   # placeholder
     )
 
     codes = [r["stock_code"] for r in stocks_all]
     exdiv_events = await fetch_upcoming_exdiv(codes, days_ahead=14)
 
-    date_str  = str(results[0]["screen_date"]) if results else "尚無資料"
+    # 篩選結果：若無資料取最近執行紀錄的日期
+    if results:
+        date_str = str(results[0]["screen_date"])
+    else:
+        last_log = next((l for l in logs if l["status"] in ("SUCCESS","FAILED")), None)
+        date_str = str(last_log["run_date"]) + "（0候選，市場動能不足）" if last_log else "尚無執行紀錄"
     inst_date = str(inst_rows[0]["trade_date"]) if inst_rows else "尚無資料"
 
     # ── 篩選結果表格 ─────────────────────────────────────────────────────────────
