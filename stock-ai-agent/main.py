@@ -422,9 +422,52 @@ async def dashboard():
           <td style='text-align:center'><small>{ai_rec}</small></td>
         </tr>"""
 
-    mkt_color = {"NORMAL": "#27ae60", "WATCH": "#2980b9", "WARNING": "#e67e22", "DANGER": "#e74c3c", "EXTREME": "#8e44ad"}.get(mkt.level, "#888")
+    _level_zh  = {"NORMAL": "正常", "WATCH": "觀察", "WARNING": "警戒", "DANGER": "危險", "EXTREME": "極度危險"}
+    _level_clr = {"NORMAL": "#27ae60", "WATCH": "#2980b9", "WARNING": "#e67e22", "DANGER": "#e74c3c", "EXTREME": "#8e44ad"}
+    _rec_zh    = {"BUY": "買入", "SELL": "賣出", "HOLD": "持有", "STRONG_SELL": "強力賣出",
+                  "STRONG_BUY": "強力買入", "WATCH": "觀察", "SHORT": "放空"}
+
+    mkt_color  = _level_clr.get(mkt.level, "#888")
+    mkt_zh     = _level_zh.get(mkt.level, mkt.level)
     bear_count = sum(1 for r in rows if r.get("is_bear_alignment"))
     high_score = sum(1 for r in rows if r.get("composite_score") and float(r["composite_score"]) >= 60)
+    fut_color  = "#e74c3c" if mkt.futures_foreign_net < 0 else "#27ae60"
+    update_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+    # 重新渲染資料列（AI建議也翻中文）
+    rows_html2 = ""
+    for r in rows:
+        sc = r.get("composite_score")
+        sc_color = score_color(sc)
+        sc_str = f"{float(sc):.0f}" if sc is not None else "—"
+        consec = r.get("foreign_consecutive_days") or 0
+        consec_str = (f"<span style='color:#e74c3c'>連賣{abs(consec)}日</span>" if consec < 0
+                      else f"<span style='color:#27ae60'>連買{consec}日</span>" if consec > 0
+                      else "<span style='color:#888'>—</span>")
+        ai_raw = r.get("ai_rec") or ""
+        ai_zh  = _rec_zh.get(ai_raw, ai_raw) if ai_raw else "—"
+        ai_color = "#e74c3c" if "賣" in ai_zh or "空" in ai_zh else ("#27ae60" if "買" in ai_zh else "#aaa")
+        sentiment = r.get("sentiment_score")
+        sent_str = (f"<span style='color:#e74c3c'>負面 {float(sentiment):.2f}</span>" if sentiment and float(sentiment) < -0.1
+                    else f"<span style='color:#27ae60'>正面 {float(sentiment):.2f}</span>" if sentiment and float(sentiment) > 0.1
+                    else "<span style='color:#888'>中性</span>")
+        rows_html2 += f"""
+        <tr>
+          <td><b style='font-family:monospace'>{r['stock_code']}</b></td>
+          <td>{r['stock_name']}</td>
+          <td><small style='color:#aaa'>{r.get('sector') or ''}</small></td>
+          <td style='text-align:center'>{bear_badge(r.get('is_bear_alignment'))}</td>
+          <td style='text-align:right'>{fmt(r.get('rsi_14'))}</td>
+          <td style='text-align:right'>{fmt(r.get('macd_histogram'),4)}</td>
+          <td style='text-align:center'>{flow_badge(r.get('institution_flow'))}</td>
+          <td style='text-align:center'>{consec_str}</td>
+          <td style='text-align:right'>{fmt(r.get('foreign_holding_ratio'))}%</td>
+          <td style='text-align:right'>{fmt(r.get('short_to_margin_ratio'))}%</td>
+          <td style='text-align:right'>{fmt(r.get('short_cover_days'),1)}日</td>
+          <td style='text-align:center'>{sent_str}</td>
+          <td style='text-align:center;font-size:16px;font-weight:bold;color:{sc_color}'>{sc_str}</td>
+          <td style='text-align:center;color:{ai_color};font-weight:bold'><small>{ai_zh}</small></td>
+        </tr>"""
 
     html = f"""<!DOCTYPE html>
 <html lang="zh-TW">
@@ -434,59 +477,89 @@ async def dashboard():
 <title>台股 AI 量化系統｜監控儀表板</title>
 <style>
   * {{ box-sizing: border-box; margin: 0; padding: 0; }}
-  body {{ font-family: -apple-system, 'Segoe UI', sans-serif; background: #0f1117; color: #e0e0e0; padding: 20px; }}
-  h1 {{ font-size: 20px; margin-bottom: 16px; color: #fff; }}
+  body {{ font-family: -apple-system, 'PingFang TC', 'Microsoft JhengHei', sans-serif;
+          background: #0f1117; color: #e0e0e0; padding: 20px; }}
+  h1 {{ font-size: 20px; margin-bottom: 6px; color: #fff; }}
+  .subtitle {{ font-size: 12px; color: #666; margin-bottom: 16px; }}
   .cards {{ display: flex; gap: 12px; flex-wrap: wrap; margin-bottom: 20px; }}
-  .card {{ background: #1a1d27; border-radius: 8px; padding: 14px 20px; min-width: 160px; }}
-  .card .label {{ font-size: 11px; color: #888; text-transform: uppercase; letter-spacing: .5px; }}
-  .card .value {{ font-size: 28px; font-weight: bold; margin-top: 4px; }}
-  table {{ width: 100%; border-collapse: collapse; background: #1a1d27; border-radius: 8px; overflow: hidden; font-size: 13px; }}
-  th {{ background: #252836; padding: 10px 8px; text-align: left; font-size: 11px; color: #aaa; text-transform: uppercase; white-space: nowrap; }}
-  td {{ padding: 8px 8px; border-bottom: 1px solid #252836; }}
-  tr:hover td {{ background: #252836; }}
-  .refresh {{ float: right; font-size: 12px; color: #888; margin-top: -40px; }}
+  .card {{ background: #1a1d27; border-radius: 8px; padding: 14px 20px; min-width: 150px; }}
+  .card .label {{ font-size: 11px; color: #888; letter-spacing: .3px; }}
+  .card .value {{ font-size: 26px; font-weight: bold; margin-top: 4px; }}
+  .section-title {{ font-size: 13px; color: #aaa; margin: 0 0 10px; padding: 6px 0;
+                    border-bottom: 1px solid #252836; }}
+  table {{ width: 100%; border-collapse: collapse; background: #1a1d27;
+           border-radius: 8px; overflow: hidden; font-size: 13px; }}
+  th {{ background: #252836; padding: 10px 8px; text-align: left;
+        font-size: 11px; color: #bbb; white-space: nowrap; font-weight: 600; }}
+  td {{ padding: 8px 8px; border-bottom: 1px solid #1e2130; }}
+  tr:hover td {{ background: #20233a; }}
+  .tag {{ display:inline-block; padding:2px 7px; border-radius:4px; font-size:11px; font-weight:600; }}
+  .footer {{ margin-top: 12px; font-size: 11px; color: #555; text-align: right; }}
 </style>
 <meta http-equiv="refresh" content="300">
 </head>
 <body>
-<h1>📊 台股 AI 量化系統 v4.0</h1>
-<div class="refresh">每 5 分鐘自動刷新 · {datetime.now().strftime('%H:%M:%S')}</div>
+<h1>📊 台股 AI 量化監控系統</h1>
+<div class="subtitle">版本 v4.0 ／ 自動刷新：每 5 分鐘 ／ 最後更新：{update_time}</div>
+
 <div class="cards">
   <div class="card">
     <div class="label">追蹤股票</div>
-    <div class="value" style="color:#3498db">{len(rows)}</div>
+    <div class="value" style="color:#3498db">{len(rows)} 檔</div>
   </div>
   <div class="card">
     <div class="label">空頭排列</div>
-    <div class="value" style="color:#e74c3c">{bear_count}</div>
+    <div class="value" style="color:#e74c3c">{bear_count} 檔</div>
   </div>
   <div class="card">
-    <div class="label">高評分（≥60）</div>
-    <div class="value" style="color:#e67e22">{high_score}</div>
+    <div class="label">高評分（≥60分）</div>
+    <div class="value" style="color:#e67e22">{high_score} 檔</div>
   </div>
   <div class="card">
-    <div class="label">大盤風險</div>
-    <div class="value" style="color:{mkt_color}">{mkt.level}</div>
+    <div class="label">大盤風險等級</div>
+    <div class="value" style="color:{mkt_color}">{mkt_zh}</div>
   </div>
   <div class="card">
-    <div class="label">大盤分數</div>
+    <div class="label">大盤風險分數</div>
     <div class="value" style="color:{mkt_color}">{mkt.total_score}</div>
   </div>
   <div class="card">
-    <div class="label">期貨外資淨部位</div>
-    <div class="value" style="color:{'#e74c3c' if mkt.futures_foreign_net < 0 else '#27ae60'}">{mkt.futures_foreign_net:+,}</div>
+    <div class="label">期貨外資淨部位（口）</div>
+    <div class="value" style="color:{fut_color}">{mkt.futures_foreign_net:+,}</div>
+  </div>
+  <div class="card">
+    <div class="label">操作建議</div>
+    <div class="value" style="color:{mkt_color};font-size:14px;margin-top:8px">{mkt.action}</div>
   </div>
 </div>
+
+<div class="section-title">📋 個股即時指標（依綜合評分排序）</div>
 <table>
 <thead>
   <tr>
-    <th>代碼</th><th>名稱</th><th>產業</th><th>均線</th><th>RSI</th>
-    <th>MACD柱</th><th>法人流向</th><th>外資連續</th><th>外資持股%</th>
-    <th>券資比%</th><th>回補天數</th><th>綜合評分</th><th>AI建議</th>
+    <th>代碼</th>
+    <th>名稱</th>
+    <th>產業</th>
+    <th>均線型態</th>
+    <th>RSI(14)</th>
+    <th>MACD 柱狀</th>
+    <th>法人動向</th>
+    <th>外資連續</th>
+    <th>外資持股%</th>
+    <th>券資比%</th>
+    <th>回補天數</th>
+    <th>新聞情緒</th>
+    <th>綜合評分</th>
+    <th>AI 建議</th>
   </tr>
 </thead>
-<tbody>{rows_html}</tbody>
+<tbody>{rows_html2}</tbody>
 </table>
+
+<div class="footer">
+  每日 22:00 自動執行完整分析（報價→技術指標→籌碼→新聞情緒→評分→AI決策→Telegram推播）<br>
+  空頭排列：5MA &lt; 20MA &lt; 60MA ／ 綜合評分：空頭(25)+RSI(25)+外資連賣(20)+券資比(15)+新聞情緒(15)
+</div>
 </body>
 </html>"""
     return HTMLResponse(content=html)
