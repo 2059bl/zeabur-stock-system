@@ -647,7 +647,7 @@ async def bot_info():
 
 # ── 報價端點 ──────────────────────────────────────────────────────────────────
 
-@app.get("/stocks/quotes")
+@app.get("/quotes")
 async def stocks_quotes():
     """所有追蹤股當日報價、漲跌幅、成交量。"""
     rows = await fetch_all(
@@ -680,32 +680,13 @@ async def stocks_quotes():
     return result
 
 
-@app.get("/stocks/quotes/{stock_code}")
+@app.get("/quote/{stock_code}")
 async def stock_quote(stock_code: str):
     """單一股票即時報價。"""
     return await fetch_quote(stock_code)
 
 
 # ── 法人籌碼端點 ──────────────────────────────────────────────────────────────
-
-@app.get("/institutional/{stock_code}")
-async def institutional_data(
-    stock_code: str,
-    trade_date: Optional[str] = Query(None, description="YYYY-MM-DD"),
-):
-    """三大法人買賣超（外資/投信/自營）。"""
-    _tz = datetime.timezone(datetime.timedelta(hours=8))
-    td  = (datetime.date.fromisoformat(trade_date)
-           if trade_date else datetime.datetime.now(_tz).date())
-    flows = await fetch_institutional_flows(stock_code, td)
-    return {"stock_code": stock_code, "trade_date": str(td), **flows}
-
-
-@app.get("/foreign-holding/{stock_code}")
-async def foreign_holding(stock_code: str):
-    """外資持股比例（%）。"""
-    return await fetch_foreign_shareholding(stock_code)
-
 
 @app.get("/institutional/summary")
 async def institutional_summary(
@@ -726,6 +707,25 @@ async def institutional_summary(
         ORDER BY i.total_net DESC
         LIMIT $2
     """, td, limit)
+
+
+@app.get("/institutional/{stock_code}")
+async def institutional_data(
+    stock_code: str,
+    trade_date: Optional[str] = Query(None, description="YYYY-MM-DD"),
+):
+    """三大法人買賣超（外資/投信/自營）。"""
+    _tz = datetime.timezone(datetime.timedelta(hours=8))
+    td  = (datetime.date.fromisoformat(trade_date)
+           if trade_date else datetime.datetime.now(_tz).date())
+    flows = await fetch_institutional_flows(stock_code, td)
+    return {"stock_code": stock_code, "trade_date": str(td), **flows}
+
+
+@app.get("/foreign-holding/{stock_code}")
+async def foreign_holding(stock_code: str):
+    """外資持股比例（%）。"""
+    return await fetch_foreign_shareholding(stock_code)
 
 
 # ── 診斷端點 ──────────────────────────────────────────────────────────────────
