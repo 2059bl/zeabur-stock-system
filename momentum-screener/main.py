@@ -992,93 +992,287 @@ async def debug_screen(
 
 @app.get("/dashboard", response_class=HTMLResponse)
 async def dashboard():
-    results = await fetch_all("""
-        SELECT rank, stock_code, stock_name, sector,
-               ROUND((daily_return*100)::numeric,2) AS ret_pct,
-               ROUND(volume_ratio::numeric,2) AS vr,
-               ROUND((turnover_rate*100)::numeric,2) AS tr_pct,
-               ROUND(float_mktcap_bn::numeric,1) AS mktcap,
-               ROUND((relative_strength*100)::numeric,2) AS rs_pct,
-               ROUND(rsi_14::numeric,1) AS rsi,
-               ROUND(composite_score::numeric,3) AS score,
-               screen_date
-        FROM screening_results
-        WHERE screen_date = (SELECT MAX(screen_date) FROM screening_results)
-        ORDER BY rank ASC
-    """)
-    logs = await fetch_all(
-        "SELECT run_date, status, candidates, error_msg, started_at FROM workflow_logs ORDER BY started_at DESC LIMIT 5"
+    _tz = datetime.timezone(datetime.timedelta(hours=8))
+    today = datetime.datetime.now(_tz).date()
+    now_str = datetime.datetime.now(_tz).strftime("%Y-%m-%d %H:%M")
+
+    # ── 資料並行抓取 ────────────────────────────────────────────────────────────
+    results, logs, inst_rows, stocks_all, exdiv_events = await asyncio.gather(
+        fetch_all("""
+            SELECT rank, stock_code, stock_name, sector,
+                   ROUND((daily_return*100)::numeric,2)    AS ret_pct,
+                   ROUND(volume_ratio::numeric,2)          AS vr,
+                   ROUND((turnover_rate*100)::numeric,2)   AS tr_pct,
+                   ROUND(float_mktcap_bn::numeric,1)       AS mktcap,
+                   ROUND((relative_strength*100)::numeric,2) AS rs_pct,
+                   ROUND(rsi_14::numeric,1) AS rsi,
+                   ROUND(composite_score::numeric,3) AS score,
+                   screen_date
+            FROM screening_results
+            WHERE screen_date = (SELECT MAX(screen_date) FROM screening_results)
+            ORDER BY rank ASC
+        """),
+        fetch_all(
+            "SELECT run_date, status, candidates, error_msg, started_at "
+            "FROM workflow_logs ORDER BY started_at DESC LIMIT 8"
+        ),
+        fetch_all("""
+            SELECT i.stock_code, s.stock_name,
+                   i.foreign_net, i.trust_net, i.dealer_net, i.total_net,
+                   i.foreign_consec, i.foreign_ratio, i.trade_date
+            FROM institutional_daily i
+            JOIN stocks s ON s.stock_code = i.stock_code
+            WHERE i.trade_date = (SELECT MAX(trade_date) FROM institutional_daily)
+              AND s.is_active = TRUE
+            ORDER BY ABS(i.foreign_net) DESC
+            LIMIT 15
+        """),
+        fetch_all("SELECT stock_code FROM stocks WHERE is_active=TRUE"),
+        fetch_all("SELECT 1"),   # placeholder
     )
 
-    date_str = str(results[0]["screen_date"]) if results else "尚無資料"
+    codes = [r["stock_code"] for r in stocks_all]
+    exdiv_events = await fetch_upcoming_exdiv(codes, days_ahead=14)
 
-    rows_html = ""
+    date_str  = str(results[0]["screen_date"]) if results else "尚無資料"
+    inst_date = str(inst_rows[0]["trade_date"]) if inst_rows else "尚無資料"
+
+    # ── 篩選結果表格 ─────────────────────────────────────────────────────────────
+    def score_bar(score):
+        pct = min(int(float(score) * 100), 100)
+        return (f'<div style="display:flex;align-items:center;gap:6px">'
+                f'<div style="flex:1;background:#1e293b;border-radius:4px;height:6px">'
+                f'<div style="width:{pct}%;background:#38bdf8;height:6px;border-radius:4px"></div></div>'
+                f'<span style="font-size:11px;color:#94a3b8;min-width:34px">{score}</span></div>')
+
+    def consec_badge(c):
+        if c is None: return '<span style="color:#64748b">—</span>'
+        c = int(c)
+        if c >= 3:   return f'<span style="color:#22c55e;font-weight:600">連買{c}日▲</span>'
+        if c > 0:    return f'<span style="color:#86efac">連買{c}日↑</span>'
+        if c <= -5:  return f'<span style="color:#ef4444;font-weight:600">連賣{abs(c)}日▼</span>'
+        if c < 0:    return f'<span style="color:#fca5a5">連賣{abs(c)}日↓</span>'
+        return '<span style="color:#64748b">持平</span>'
+
+    def net_cell(v):
+        v = int(v or 0)
+        if v > 0:  return f'<span style="color:#22c55e">+{v:,}</span>'
+        if v < 0:  return f'<span style="color:#ef4444">{v:,}</span>'
+        return '<span style="color:#64748b">0</span>'
+
+    screen_rows = ""
     for r in results:
-        rsi_color = "#ef4444" if r["rsi"] and float(r["rsi"]) > 65 else "#22c55e"
-        rows_html += f"""
-        <tr>
-          <td>{r['rank']}</td>
-          <td><strong>{r['stock_code']}</strong></td>
+        rsi_v = float(r["rsi"]) if r["rsi"] else 0
+        rsi_c = "#ef4444" if rsi_v > 70 else "#f59e0b" if rsi_v > 60 else "#22c55e"
+        ret   = float(r["ret_pct"] or 0)
+        ret_c = "#22c55e" if ret > 0 else "#ef4444"
+        screen_rows += f"""<tr>
+          <td style="color:#64748b">{r['rank']}</td>
+          <td><span style="font-weight:700;color:#38bdf8">{r['stock_code']}</span></td>
           <td>{r['stock_name']}</td>
-          <td>{r['sector'] or '—'}</td>
-          <td style="color:#22c55e">+{r['ret_pct']}%</td>
-          <td>{r['vr']}×</td>
+          <td style="color:#64748b;font-size:11px">{r['sector'] or '—'}</td>
+          <td style="color:{ret_c};font-weight:600">{'+' if ret>0 else ''}{ret:.2f}%</td>
+          <td style="color:#f59e0b">{r['vr']}×</td>
           <td>{r['tr_pct'] or '—'}%</td>
-          <td>{r['mktcap'] or '—'}億</td>
-          <td>+{r['rs_pct']}%</td>
-          <td style="color:{rsi_color}">{r['rsi'] or '—'}</td>
-          <td><strong>{r['score']}</strong></td>
+          <td style="color:#94a3b8">{r['mktcap'] or '—'}億</td>
+          <td style="color:#a78bfa">+{r['rs_pct']}%</td>
+          <td style="color:{rsi_c}">{r['rsi'] or '—'}</td>
+          <td>{score_bar(r['score'])}</td>
         </tr>"""
 
+    # ── 三大法人表格 ─────────────────────────────────────────────────────────────
+    inst_html = ""
+    for r in inst_rows:
+        ratio = float(r["foreign_ratio"] or 0)
+        ratio_bar = (f'<div style="display:flex;align-items:center;gap:4px">'
+                     f'<div style="width:60px;background:#1e293b;border-radius:3px;height:5px">'
+                     f'<div style="width:{min(ratio,100):.0f}%;background:#818cf8;height:5px;border-radius:3px"></div></div>'
+                     f'<span style="font-size:11px;color:#94a3b8">{ratio:.1f}%</span></div>')
+        inst_html += f"""<tr>
+          <td><span style="font-weight:600;color:#e2e8f0">{r['stock_code']}</span></td>
+          <td style="color:#94a3b8">{r['stock_name']}</td>
+          <td>{net_cell(r['foreign_net'])}</td>
+          <td>{net_cell(r['trust_net'])}</td>
+          <td>{net_cell(r['dealer_net'])}</td>
+          <td>{net_cell(r['total_net'])}</td>
+          <td>{consec_badge(r['foreign_consec'])}</td>
+          <td>{ratio_bar}</td>
+        </tr>"""
+
+    # ── 除權息卡片 ─────────────────────────────────────────────────────────────
+    exdiv_html = ""
+    for ev in exdiv_events:
+        cash = ev.get("cash_dividend", "")
+        exdiv_html += f"""<div style="background:#1e293b;border-left:3px solid #f59e0b;padding:10px 14px;border-radius:6px;margin-bottom:8px">
+          <span style="color:#f59e0b;font-weight:700">{ev['stock_code']}</span>
+          <span style="color:#e2e8f0;margin:0 8px">{ev['stock_name']}</span>
+          <span style="color:#64748b;font-size:12px">除權息日 {ev['ex_date']} ｜ 最後買進 {ev['last_buy_date']}</span>
+          {'<span style="color:#fbbf24;font-size:12px;margin-left:8px">現金 '+cash+'元</span>' if cash else ''}
+        </div>"""
+
+    # ── 執行紀錄 ────────────────────────────────────────────────────────────────
     log_html = ""
     for l in logs:
-        color = "#22c55e" if l["status"] == "SUCCESS" else "#ef4444" if l["status"] == "FAILED" else "#f59e0b"
-        log_html += f"<tr><td>{l['run_date']}</td><td style='color:{color}'>{l['status']}</td><td>{l['candidates'] or '—'}</td><td style='font-size:11px'>{l['error_msg'] or ''}</td></tr>"
+        sc = "#22c55e" if l["status"] == "SUCCESS" else "#ef4444" if l["status"] == "FAILED" else "#f59e0b"
+        badge_bg = "#166534" if l["status"] == "SUCCESS" else "#7f1d1d" if l["status"] == "FAILED" else "#78350f"
+        err = (l["error_msg"] or "")[:60]
+        log_html += f"""<tr>
+          <td style="color:#94a3b8">{l['run_date']}</td>
+          <td><span style="background:{badge_bg};color:{sc};padding:2px 8px;border-radius:999px;font-size:11px">{l['status']}</span></td>
+          <td style="color:#e2e8f0">{l['candidates'] or '—'}</td>
+          <td style="font-size:11px;color:#64748b">{err}</td>
+        </tr>"""
+
+    no_data = '<tr><td colspan="99" style="text-align:center;padding:30px;color:#64748b">尚無資料</td></tr>'
 
     return f"""<!DOCTYPE html>
 <html lang="zh-Hant">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>尾盤動量篩選系統</title>
+<meta http-equiv="refresh" content="300">
+<title>台股動量篩選儀表板</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Noto+Sans+TC:wght@400;600;700&display=swap" rel="stylesheet">
 <style>
-  * {{ box-sizing:border-box; margin:0; padding:0 }}
-  body {{ background:#0f172a; color:#e2e8f0; font-family:'Noto Sans TC',sans-serif; padding:24px }}
-  h1 {{ font-size:22px; color:#38bdf8; margin-bottom:4px }}
-  .subtitle {{ color:#64748b; font-size:13px; margin-bottom:24px }}
-  .card {{ background:#1e293b; border-radius:12px; padding:20px; margin-bottom:20px }}
-  table {{ width:100%; border-collapse:collapse; font-size:13px }}
-  th {{ background:#0f172a; color:#94a3b8; padding:10px 8px; text-align:left; position:sticky; top:0 }}
-  td {{ padding:9px 8px; border-bottom:1px solid #334155 }}
-  tr:hover td {{ background:#263047 }}
-  .badge {{ display:inline-block; padding:2px 8px; border-radius:999px; font-size:11px }}
-  .ok {{ background:#166534; color:#86efac }}
-  .fail {{ background:#7f1d1d; color:#fca5a5 }}
+  *{{box-sizing:border-box;margin:0;padding:0}}
+  body{{background:#0a0f1e;color:#e2e8f0;font-family:'Noto Sans TC',sans-serif;min-height:100vh}}
+  .topbar{{background:#0f172a;border-bottom:1px solid #1e293b;padding:12px 24px;display:flex;align-items:center;justify-content:space-between;position:sticky;top:0;z-index:100}}
+  .topbar h1{{font-size:17px;color:#38bdf8;font-weight:700;letter-spacing:.5px}}
+  .topbar .meta{{font-size:12px;color:#475569;display:flex;gap:16px;align-items:center}}
+  .refresh-dot{{width:8px;height:8px;border-radius:50%;background:#22c55e;animation:pulse 2s infinite}}
+  @keyframes pulse{{0%,100%{{opacity:1}}50%{{opacity:.4}}}}
+  .main{{padding:20px 24px;max-width:1400px;margin:0 auto}}
+  .section-title{{font-size:13px;font-weight:600;color:#64748b;text-transform:uppercase;letter-spacing:.8px;margin-bottom:12px;display:flex;align-items:center;gap:8px}}
+  .section-title::after{{content:'';flex:1;height:1px;background:#1e293b}}
+  .card{{background:#0f172a;border:1px solid #1e293b;border-radius:12px;padding:16px 20px;margin-bottom:24px}}
+  .stat-grid{{display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:12px;margin-bottom:24px}}
+  .stat{{background:#0f172a;border:1px solid #1e293b;border-radius:10px;padding:14px 16px}}
+  .stat .label{{font-size:11px;color:#64748b;margin-bottom:4px}}
+  .stat .val{{font-size:22px;font-weight:700;color:#e2e8f0}}
+  .stat .sub{{font-size:11px;color:#475569;margin-top:2px}}
+  table{{width:100%;border-collapse:collapse;font-size:13px}}
+  th{{background:#080d1a;color:#475569;padding:9px 10px;text-align:left;font-size:11px;text-transform:uppercase;letter-spacing:.5px;border-bottom:1px solid #1e293b;position:sticky;top:49px}}
+  td{{padding:10px 10px;border-bottom:1px solid #0f172a}}
+  tr:hover td{{background:#111827}}
+  .tabs{{display:flex;gap:2px;margin-bottom:16px}}
+  .tab{{padding:6px 16px;border-radius:6px;font-size:13px;cursor:pointer;color:#64748b;border:none;background:none}}
+  .tab.active{{background:#1e293b;color:#e2e8f0;font-weight:600}}
+  .tab-content{{display:none}}.tab-content.active{{display:block}}
+  .countdown{{font-size:11px;color:#475569}}
+  @media(max-width:768px){{.main{{padding:12px}}.stat-grid{{grid-template-columns:repeat(2,1fr)}}}}
 </style>
 </head>
 <body>
-<h1>📈 尾盤動量突破篩選系統</h1>
-<p class="subtitle">策略：7道過濾器 ｜ 排程：每日 22:00 Asia/Taipei ｜ 最新篩選：{date_str}</p>
+<div class="topbar">
+  <h1>📈 台股動量篩選儀表板</h1>
+  <div class="meta">
+    <div class="refresh-dot"></div>
+    <span>5分鐘自動刷新</span>
+    <span>更新：{now_str}</span>
+    <span id="cd" class="countdown"></span>
+  </div>
+</div>
+<div class="main">
 
-<div class="card">
-  <h2 style="font-size:15px;color:#94a3b8;margin-bottom:12px">候選股（{len(results)} 檔）</h2>
-  <div style="overflow-x:auto">
-  <table>
-    <thead><tr>
-      <th>#</th><th>代碼</th><th>名稱</th><th>類股</th>
-      <th>漲幅</th><th>量比</th><th>換手率</th><th>市值</th>
-      <th>相對強度</th><th>RSI</th><th>綜合分</th>
-    </tr></thead>
-    <tbody>{rows_html or '<tr><td colspan="11" style="text-align:center;padding:30px;color:#64748b">尚無篩選資料</td></tr>'}</tbody>
-  </table>
+<!-- KPI 卡片 -->
+<div class="stat-grid">
+  <div class="stat">
+    <div class="label">本日候選股</div>
+    <div class="val" style="color:#38bdf8">{len(results)}</div>
+    <div class="sub">篩選日期：{date_str}</div>
+  </div>
+  <div class="stat">
+    <div class="label">追蹤股總數</div>
+    <div class="val">{len(codes)}</div>
+    <div class="sub">法人資料：{inst_date}</div>
+  </div>
+  <div class="stat">
+    <div class="label">法人資料股數</div>
+    <div class="val">{len(inst_rows)}</div>
+    <div class="sub">最大買超前15檔</div>
+  </div>
+  <div class="stat">
+    <div class="label">除權息預警</div>
+    <div class="val" style="color:{'#f59e0b' if exdiv_events else '#22c55e'}">{len(exdiv_events)}</div>
+    <div class="sub">未來14日內</div>
   </div>
 </div>
 
-<div class="card">
-  <h2 style="font-size:15px;color:#94a3b8;margin-bottom:12px">執行紀錄</h2>
-  <table>
-    <thead><tr><th>日期</th><th>狀態</th><th>候選數</th><th>錯誤</th></tr></thead>
-    <tbody>{log_html or '<tr><td colspan="4" style="text-align:center;padding:20px;color:#64748b">尚無執行紀錄</td></tr>'}</tbody>
-  </table>
+<!-- 主內容 Tab -->
+<div class="tabs">
+  <button class="tab active" onclick="switchTab('screen')">🎯 篩選結果</button>
+  <button class="tab" onclick="switchTab('inst')">🏦 三大法人</button>
+  <button class="tab" onclick="switchTab('exdiv')">📅 除權息</button>
+  <button class="tab" onclick="switchTab('logs')">📋 執行紀錄</button>
 </div>
+
+<div id="screen" class="tab-content active">
+  <div class="card">
+    <div class="section-title">動量候選股（{date_str}）</div>
+    <div style="overflow-x:auto">
+    <table>
+      <thead><tr>
+        <th>#</th><th>代碼</th><th>名稱</th><th>類股</th>
+        <th>漲幅</th><th>量比</th><th>換手率</th><th>市值</th>
+        <th>相對強度</th><th>RSI</th><th>綜合分</th>
+      </tr></thead>
+      <tbody>{screen_rows or no_data}</tbody>
+    </table>
+    </div>
+  </div>
+</div>
+
+<div id="inst" class="tab-content">
+  <div class="card">
+    <div class="section-title">三大法人買賣超（{inst_date}，按外資絕對值排序前15）</div>
+    <div style="overflow-x:auto">
+    <table>
+      <thead><tr>
+        <th>代碼</th><th>名稱</th>
+        <th>外資(張)</th><th>投信(張)</th><th>自營(張)</th><th>合計(張)</th>
+        <th>外資連續</th><th>外資持股</th>
+      </tr></thead>
+      <tbody>{inst_html or no_data}</tbody>
+    </table>
+    </div>
+  </div>
+</div>
+
+<div id="exdiv" class="tab-content">
+  <div class="card">
+    <div class="section-title">除權息預警（追蹤股，未來14日）</div>
+    {exdiv_html or '<p style="color:#64748b;padding:20px 0">未來14日內無除權息事件</p>'}
+  </div>
+</div>
+
+<div id="logs" class="tab-content">
+  <div class="card">
+    <div class="section-title">排程執行紀錄</div>
+    <table>
+      <thead><tr><th>日期</th><th>狀態</th><th>候選數</th><th>錯誤訊息</th></tr></thead>
+      <tbody>{log_html or no_data}</tbody>
+    </table>
+  </div>
+</div>
+
+</div>
+<script>
+function switchTab(id){{
+  document.querySelectorAll('.tab-content').forEach(el=>el.classList.remove('active'));
+  document.querySelectorAll('.tab').forEach(el=>el.classList.remove('active'));
+  document.getElementById(id).classList.add('active');
+  event.target.classList.add('active');
+}}
+// 倒數計時器
+(function(){{
+  var left=300;
+  var el=document.getElementById('cd');
+  setInterval(function(){{
+    left--;if(left<=0)left=300;
+    var m=Math.floor(left/60),s=left%60;
+    el.textContent='刷新倒數 '+m+':'+(s<10?'0':'')+s;
+  }},1000);
+}})();
+</script>
 </body></html>"""
