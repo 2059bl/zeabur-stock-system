@@ -458,7 +458,7 @@ async def debug_screen(
         ma5, ma10, ma20, ma60 = data["ma5"], data["ma10"], data["ma20"], data["ma60"]
         float_sh   = stock.get("float_shares") or stock.get("shares_outstanding")
         volume_today = data["volume_today"]
-        turnover   = (volume_today / float_sh) if (float_sh and float_sh > 0 and volume_today > 0) else None
+        turnover   = ((volume_today * 1000) / float_sh) if (float_sh and float_sh > 0 and volume_today > 0) else None
         float_mktcap = price * (float_sh or 0)
         rsi_val    = _rsi(closes)
 

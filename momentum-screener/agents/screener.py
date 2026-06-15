@@ -125,7 +125,8 @@ async def run_screening(trade_date: datetime.date) -> list[dict]:
         float_sh  = stock.get("float_shares") or stock.get("shares_outstanding")
         turnover  = None
         if float_sh and float_sh > 0 and data["volume_today"] > 0:
-            turnover = data["volume_today"] / float_sh
+            # volume_today 單位：張（1張=1000股）；float_sh 單位：股
+            turnover = (data["volume_today"] * 1000) / float_sh
         if turnover is not None and not (CFG["turnover_min"] <= turnover <= CFG["turnover_max"]):
             continue
 
