@@ -130,7 +130,7 @@ async def run_screening(trade_date: datetime.date) -> list[dict]:
             continue
 
         # ── Step 4: 流通市值 250億~2500億 ───────────────────────────────────
-        float_mktcap = price * (float_sh or 0) * 1000  # 張 → 股（×1000）
+        float_mktcap = price * (float_sh or 0)  # float_sh 單位：股
         if float_sh and float_sh > 0:
             if not (CFG["mktcap_min"] <= float_mktcap <= CFG["mktcap_max"]):
                 continue

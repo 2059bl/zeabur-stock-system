@@ -12,7 +12,7 @@ logger = logging.getLogger(__name__)
 _YAHOO_HEADERS = {"User-Agent": "Mozilla/5.0 (compatible; StockScreener/2.0)"}
 
 # Yahoo Finance：近 10 日日 K
-_YAHOO_CHART = "https://query1.finance.yahoo.com/v8/finance/chart/{ticker}?interval=1d&range=15d"
+_YAHOO_CHART = "https://query1.finance.yahoo.com/v8/finance/chart/{ticker}?interval=1d&range=90d"
 # TWSE 月成交資料（上市）
 _TWSE_URL = "https://www.twse.com.tw/exchangeReport/STOCK_DAY?response=json&date={date}&stockNo={code}"
 

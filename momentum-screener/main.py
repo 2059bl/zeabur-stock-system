@@ -139,7 +139,8 @@ async def _handle_update(update: dict):
         await send_message("\n".join(lines), chat_id=chat_id)
 
     elif text.startswith("/run"):
-        today = datetime.date.today()
+        _tz_taipei = datetime.timezone(datetime.timedelta(hours=8))
+        today = datetime.datetime.now(_tz_taipei).date()
         await send_message(f"⚙️ 已觸發 {today} 篩選，約 1 分鐘後推播結果", chat_id=chat_id)
         asyncio.create_task(_screening_worker(today))
 
@@ -197,11 +198,6 @@ async def _handle_update(update: dict):
 async def _screening_worker(trade_date: datetime.date):
     log_id = None
     try:
-        res = await execute(
-            "INSERT INTO workflow_logs (run_date, status) VALUES ($1, 'RUNNING') RETURNING id",
-            trade_date,
-        )
-        # asyncpg execute 不回傳 RETURNING，改用 fetch_all
         row = await fetch_all(
             "INSERT INTO workflow_logs (run_date, status) VALUES ($1, 'RUNNING') RETURNING id",
             trade_date,
@@ -251,7 +247,8 @@ async def _screening_worker(trade_date: datetime.date):
 
 
 async def _scheduled_run():
-    today = datetime.date.today()
+    _tz_taipei = datetime.timezone(datetime.timedelta(hours=8))
+    today = datetime.datetime.now(_tz_taipei).date()
     logger.info(f"[排程] 22:00 自動觸發篩選：{today}")
     await _screening_worker(today)
 
@@ -343,7 +340,8 @@ async def remove_stock(stock_code: str):
 
 @app.post("/run")
 async def trigger_run(req: RunRequest, background_tasks: BackgroundTasks):
-    td = datetime.date.fromisoformat(req.trade_date) if req.trade_date else datetime.date.today()
+    _tz_taipei = datetime.timezone(datetime.timedelta(hours=8))
+    td = datetime.date.fromisoformat(req.trade_date) if req.trade_date else datetime.datetime.now(_tz_taipei).date()
     background_tasks.add_task(_screening_worker, td)
     return {"status": "已排入執行", "date": str(td)}
 
