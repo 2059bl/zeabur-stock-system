@@ -22,9 +22,13 @@ from apscheduler.triggers.cron import CronTrigger
 
 from agents.screener import run_screening, save_results, CFG
 from utils.db import get_pool, fetch_all, execute
-from utils.notifier import send_message, set_webhook, get_me
-from utils.institutional import fetch_institutional_flows, fetch_foreign_shareholding
+from utils.notifier import send_message, send_photo, set_webhook, get_me
+from utils.institutional import (
+    fetch_institutional_flows, fetch_foreign_shareholding, fetch_foreign_ratio_trend,
+)
 from utils.fugle import fetch_all_quotes, fetch_quote
+from utils.kline import generate_kline_chart
+from utils.dividend import fetch_upcoming_exdiv
 
 logging.basicConfig(
     level=logging.INFO,
@@ -149,17 +153,19 @@ async def _handle_update(update: dict):
 
     if text.startswith("/start") or text.startswith("/help"):
         await send_message(
-            "📊 *尾盤動量篩選機器人 v2.0*\n\n"
+            "📊 *尾盤動量篩選機器人 v2.2*\n\n"
             "*📈 篩選功能*\n"
             "`/today` — 今日篩選結果\n"
             "`/history` — 近 5 日紀錄\n"
             "`/run` — 立即觸發篩選\n\n"
             "*💰 報價功能*\n"
             "`/quotes` — 所有追蹤股今日漲跌\n"
-            "`/q 代號` — 查單一股票（如 `/q 2330`）\n\n"
+            "`/q 代號` — 查單一股票 + K 線圖（如 `/q 2330`）\n\n"
             "*🏦 法人籌碼*\n"
-            "`/foreign 代號` — 外資買賣超+持股比例\n"
+            "`/foreign 代號` — 外資買賣超 + 持股比例趨勢\n"
             "`/institutional 代號` — 三大法人明細\n\n"
+            "*📅 除權息*\n"
+            "`/exdiv` — 追蹤股未來 7 日除權息清單\n\n"
             "*⚙️ 系統功能*\n"
             "`/stocks` — 追蹤股票清單\n"
             "`/config` — 篩選參數\n\n"
@@ -246,15 +252,20 @@ async def _handle_update(update: dict):
         if not q:
             await send_message(f"❌ 找不到 {code} 的報價", chat_id=chat_id)
             return
-        sign = "+" if q["change_pct"] >= 0 else ""
+        sign  = "+" if q["change_pct"] >= 0 else ""
         emoji = "🟢" if q["change_pct"] > 0 else ("🔴" if q["change_pct"] < 0 else "⬜")
-        await send_message(
+        caption = (
             f"{emoji} *{code} {name or q.get('name','')}*\n"
             f"現價：*{q['close']}*  {sign}{q['change']:.2f} ({sign}{q['change_pct']:.2f}%)\n"
             f"開高低：{q['open']} / {q['high']} / {q['low']}\n"
-            f"成交量：{q['volume']} 張",
-            chat_id=chat_id,
+            f"成交量：{q['volume']} 張"
         )
+        # 嘗試傳送 K 線圖（含報價 caption）
+        chart = await generate_kline_chart(code, name or q.get("name", ""), days=10)
+        if chart:
+            await send_photo(chart, caption=caption, chat_id=chat_id)
+        else:
+            await send_message(caption, chat_id=chat_id)
 
     elif text.startswith("/foreign"):
         parts = text.split()
@@ -275,6 +286,17 @@ async def _handle_update(update: dict):
                       else (f"連賣 {abs(consec)} 日 📉" if consec < 0 else "持平"))
         net_str = f"+{net:,}" if net >= 0 else f"{net:,}"
 
+        # 外資持股比例趨勢
+        trend_data = await fetch_foreign_ratio_trend(code, days=5)
+        r_days = trend_data.get("rising_days", 0)
+        r_ratios = trend_data.get("ratios", [])
+        if r_days >= 3:
+            trend_str = f"📈 連續上升 {r_days} 日（{' → '.join(str(x)+'%' for x in r_ratios[-3:])}）"
+        elif r_days <= -3:
+            trend_str = f"📉 連續下降 {abs(r_days)} 日（{' → '.join(str(x)+'%' for x in r_ratios[-3:])}）"
+        else:
+            trend_str = f"{'↗' if r_days>0 else '↘' if r_days<0 else '→'} 近期{'上升' if r_days>0 else '下降' if r_days<0 else '持平'}"
+
         await send_message(
             f"🏦 *{code} 外資籌碼*（{td}）\n\n"
             f"外資買超：{flows.get('foreign_buy',0):,} 張\n"
@@ -285,6 +307,7 @@ async def _handle_update(update: dict):
             f"自營商買賣超：{flows.get('dealer_net',0):,} 張\n"
             f"三大法人合計：{flows.get('total_net',0):,} 張\n\n"
             f"外資持股比例：*{ratio}%*\n"
+            f"持股趨勢：{trend_str}\n"
             f"（資料日期：{holding.get('date','N/A')}）",
             chat_id=chat_id,
         )
@@ -310,6 +333,28 @@ async def _handle_update(update: dict):
             f"外資連續：{flows.get('foreign_consec',0)} 日",
             chat_id=chat_id,
         )
+
+    elif text.startswith("/exdiv"):
+        await send_message("⏳ 查詢除權息日曆中...", chat_id=chat_id)
+        rows = await fetch_all(
+            "SELECT stock_code FROM stocks WHERE is_active=TRUE"
+        )
+        codes   = [r["stock_code"] for r in rows]
+        events  = await fetch_upcoming_exdiv(codes, days_ahead=14)
+        if not events:
+            await send_message("📅 未來 14 日內追蹤股無除權息事件", chat_id=chat_id)
+        else:
+            lines = ["📅 *追蹤股除權息日曆（未來 14 日）*\n"]
+            for ev in events:
+                cash  = f"現金 {ev['cash_dividend']} 元" if ev.get("cash_dividend") else ""
+                stock = f"股票 {ev['stock_dividend']} 元" if ev.get("stock_dividend") else ""
+                div_info = " / ".join(filter(None, [cash, stock])) or ev.get("dividend_type", "")
+                lines.append(
+                    f"⚠️ `{ev['stock_code']}` {ev['stock_name']}\n"
+                    f"    除權息日：{ev['ex_date']}  最後買進：{ev['last_buy_date']}\n"
+                    f"    {div_info}"
+                )
+            await send_message("\n".join(lines), chat_id=chat_id)
 
     elif text.startswith("/run"):
         _tz_taipei = datetime.timezone(datetime.timedelta(hours=8))
@@ -463,6 +508,45 @@ async def _update_institutional_cache(trade_date: datetime.date):
     logger.info(f"[法人] {trade_date} 法人資料更新完成")
 
 
+async def _chip_reversal_alert(trade_date: datetime.date):
+    """
+    籌碼轉向偵測：昨日外資連賣（consec < 0）→ 今日轉買（foreign_net > 0）。
+    偵測到後推播 Telegram 做為短線進場參考。
+    """
+    # 找出今日轉買 + 昨日為連賣狀態的股票
+    rows = await fetch_all("""
+        SELECT t.stock_code, s.stock_name,
+               t.foreign_net  AS today_net,
+               y.foreign_consec AS yest_consec
+        FROM institutional_daily t
+        JOIN institutional_daily y
+          ON t.stock_code = y.stock_code
+         AND y.trade_date = (
+               SELECT MAX(trade_date) FROM institutional_daily
+               WHERE stock_code = t.stock_code AND trade_date < $1
+             )
+        JOIN stocks s ON s.stock_code = t.stock_code
+        WHERE t.trade_date = $1
+          AND t.foreign_net > 0
+          AND y.foreign_consec <= -3
+        ORDER BY y.foreign_consec ASC
+    """, trade_date)
+
+    if not rows:
+        logger.info(f"[轉向] {trade_date} 無籌碼轉向訊號")
+        return
+
+    lines = [f"🔄 *籌碼轉向訊號*（{trade_date}）\n"]
+    lines.append("以下股票外資由賣轉買，短線留意：\n")
+    for r in rows:
+        lines.append(
+            f"✅ `{r['stock_code']}` {r['stock_name']}\n"
+            f"    昨連賣 {abs(r['yest_consec'])} 日 → 今轉買 +{r['today_net']:,} 張"
+        )
+    await send_message("\n".join(lines))
+    logger.info(f"[轉向] 推播籌碼轉向訊號：{len(rows)} 檔")
+
+
 async def _foreign_sell_alert(trade_date: datetime.date, threshold: int = 5):
     """外資連賣預警：連賣天數 ≥ threshold 的股票推播到 Telegram。"""
     rows = await fetch_all("""
@@ -499,8 +583,21 @@ async def _scheduled_run():
         _screening_worker(today),
         _update_institutional_cache(today),
     )
-    # 法人資料更新完成後推播外資連賣預警
-    await _foreign_sell_alert(today)
+    # 法人資料更新完成後，並行推播：外資連賣預警 + 籌碼轉向訊號
+    await asyncio.gather(
+        _foreign_sell_alert(today),
+        _chip_reversal_alert(today),
+    )
+    # 除權息預警（14 日內）
+    stocks = await fetch_all("SELECT stock_code FROM stocks WHERE is_active=TRUE")
+    codes  = [r["stock_code"] for r in stocks]
+    exdivs = await fetch_upcoming_exdiv(codes, days_ahead=14)
+    if exdivs:
+        lines = [f"📅 *除權息預警*（未來 14 日內）\n"]
+        for ev in exdivs:
+            cash = f"現金 {ev['cash_dividend']}元" if ev.get("cash_dividend") else ""
+            lines.append(f"⚠️ `{ev['stock_code']}` {ev['stock_name']}  除權息日 {ev['ex_date']}  {cash}")
+        await send_message("\n".join(lines))
 
 
 # ── Lifespan ──────────────────────────────────────────────────────────────────
@@ -620,6 +717,15 @@ async def trigger_foreign_alert(
            if trade_date else datetime.datetime.now(_tz).date())
     await _foreign_sell_alert(td, threshold)
     return {"status": "預警推播完成", "date": str(td), "threshold": threshold}
+
+
+@app.get("/exdiv")
+async def get_exdiv(days_ahead: int = Query(14, description="查詢未來幾日")):
+    """查詢追蹤股未來除權息清單。"""
+    stocks = await fetch_all("SELECT stock_code FROM stocks WHERE is_active=TRUE")
+    codes  = [r["stock_code"] for r in stocks]
+    events = await fetch_upcoming_exdiv(codes, days_ahead=days_ahead)
+    return {"days_ahead": days_ahead, "count": len(events), "events": events}
 
 
 @app.get("/results")

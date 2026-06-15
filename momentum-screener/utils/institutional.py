@@ -174,3 +174,41 @@ async def fetch_consecutive_foreign_days(stock_code: str,
         else:
             break
     return consec
+
+
+async def fetch_foreign_ratio_trend(stock_code: str, days: int = 5) -> dict:
+    """
+    取得外資持股比例近 days 日趨勢。
+    回傳 {ratios, dates, rising_days, trend, latest}
+    rising_days > 0 表示連續上升天數，< 0 表示連續下降天數。
+    """
+    end   = datetime.date.today()
+    start = end - datetime.timedelta(days=days * 3)
+    records = await _finmind_get("TaiwanStockShareholding", stock_code, start, end)
+    if not records:
+        return {"ratios": [], "dates": [], "rising_days": 0, "trend": "flat", "latest": 0}
+
+    records = sorted(records, key=lambda x: x.get("date", ""))[-days:]
+    ratios  = [float(r.get("ForeignInvestmentSharesRatio", 0) or 0) for r in records]
+    dates   = [r.get("date", "") for r in records]
+
+    consec = 0
+    for i in range(len(ratios) - 1, 0, -1):
+        diff = ratios[i] - ratios[i - 1]
+        if consec == 0:
+            consec = 1 if diff > 0 else (-1 if diff < 0 else 0)
+        elif consec > 0 and diff > 0:
+            consec += 1
+        elif consec < 0 and diff < 0:
+            consec -= 1
+        else:
+            break
+
+    trend = "up" if consec > 0 else ("down" if consec < 0 else "flat")
+    return {
+        "ratios":      [round(r, 2) for r in ratios],
+        "dates":       dates,
+        "rising_days": consec,
+        "trend":       trend,
+        "latest":      ratios[-1] if ratios else 0,
+    }

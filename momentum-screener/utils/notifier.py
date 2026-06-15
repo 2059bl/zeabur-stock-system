@@ -33,6 +33,32 @@ async def send_message(text: str, chat_id: str = "") -> bool:
         return False
 
 
+async def send_photo(
+    image_bytes: bytes,
+    caption: str = "",
+    chat_id: str = "",
+) -> bool:
+    """傳送圖片到 Telegram。"""
+    if not BOT_TOKEN:
+        return False
+    target = chat_id or CHAT_ID
+    if not target:
+        return False
+    try:
+        async with httpx.AsyncClient(timeout=30) as c:
+            r = await c.post(
+                f"{_BASE}/sendPhoto",
+                data={"chat_id": target, "caption": caption, "parse_mode": "Markdown"},
+                files={"photo": ("chart.png", image_bytes, "image/png")},
+            )
+            if r.status_code != 200:
+                logger.warning(f"Telegram sendPhoto 失敗: {r.text[:200]}")
+            return r.status_code == 200
+    except Exception as e:
+        logger.error(f"Telegram 圖片推播失敗: {e}")
+        return False
+
+
 async def set_webhook(url: str) -> dict:
     async with httpx.AsyncClient(timeout=10) as c:
         r = await c.post(f"{_BASE}/setWebhook", json={"url": url})
