@@ -1,9 +1,11 @@
 """
-尾盤動量突破短線篩選系統 v1.0
+尾盤動量突破短線篩選系統 v2.0
 ================================
 - 每日 22:00 自動執行 7 道過濾器篩選
-- Telegram 推播結果
-- REST API 供查詢與手動觸發
+- 三大法人籌碼追蹤（外資/投信/自營）
+- 外資持股比例（FinMind）
+- 即時報價與漲跌幅（富果/Yahoo）
+- Telegram 智能客服聊天 + 指令機器人
 """
 import os
 import asyncio
@@ -21,6 +23,8 @@ from apscheduler.triggers.cron import CronTrigger
 from agents.screener import run_screening, save_results, CFG
 from utils.db import get_pool, fetch_all, execute
 from utils.notifier import send_message, set_webhook, get_me
+from utils.institutional import fetch_institutional_flows, fetch_foreign_shareholding
+from utils.fugle import fetch_all_quotes, fetch_quote
 
 logging.basicConfig(
     level=logging.INFO,
@@ -35,6 +39,8 @@ SCHEDULE_TZ     = os.environ.get("SCHEDULE_TZ", "Asia/Taipei")
 scheduler = AsyncIOScheduler(timezone=SCHEDULE_TZ)
 
 # ── 資料庫 Schema ──────────────────────────────────────────────────────────────
+
+OLLAMA_HOST = os.environ.get("OLLAMA_HOST", "http://ollama-inference.zeabur.app")
 
 _SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS stocks (
@@ -75,9 +81,64 @@ CREATE TABLE IF NOT EXISTS workflow_logs (
     started_at   TIMESTAMPTZ DEFAULT NOW(),
     finished_at  TIMESTAMPTZ
 );
+
+CREATE TABLE IF NOT EXISTS institutional_daily (
+    id            BIGSERIAL PRIMARY KEY,
+    stock_code    VARCHAR(10) NOT NULL,
+    trade_date    DATE        NOT NULL,
+    foreign_buy   BIGINT      DEFAULT 0,
+    foreign_sell  BIGINT      DEFAULT 0,
+    foreign_net   BIGINT      DEFAULT 0,
+    trust_net     BIGINT      DEFAULT 0,
+    dealer_net    BIGINT      DEFAULT 0,
+    total_net     BIGINT      DEFAULT 0,
+    foreign_consec INT        DEFAULT 0,
+    foreign_ratio  NUMERIC(6,2),
+    updated_at    TIMESTAMPTZ DEFAULT NOW(),
+    UNIQUE(stock_code, trade_date)
+);
 """
 
 # ── Telegram Webhook 處理 ──────────────────────────────────────────────────────
+
+async def _ollama_chat(user_message: str) -> str:
+    """呼叫 Ollama LLM 回應自然語言問題。"""
+    import httpx
+    system_prompt = (
+        "你是一位專業的台股量化選股助理，負責解說「尾盤動量突破短線篩選系統」的功能與結果。\n"
+        "你熟悉技術分析（MA均線、RSI、量比、換手率）、三大法人籌碼（外資/投信/自營商）、\n"
+        "以及台灣股市的基本知識。\n"
+        "回答請用繁體中文，簡潔專業，必要時使用條列式說明。\n"
+        "若問題超出股票範疇，禮貌說明你專注於股市分析。"
+    )
+    try:
+        async with httpx.AsyncClient(timeout=30) as c:
+            r = await c.post(
+                f"{OLLAMA_HOST}/api/chat",
+                json={
+                    "model": "llama3.1:8b",
+                    "messages": [
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user",   "content": user_message},
+                    ],
+                    "stream": False,
+                },
+            )
+            if r.status_code == 200:
+                return r.json().get("message", {}).get("content", "")
+    except Exception as e:
+        logger.warning(f"Ollama chat error: {e}")
+
+    # Fallback: 基本關鍵字回應
+    msg_lower = user_message.lower()
+    if any(k in msg_lower for k in ["外資", "法人", "籌碼"]):
+        return "請用 `/foreign 股票代號` 查詢外資籌碼，例如 `/foreign 2330`"
+    if any(k in msg_lower for k in ["報價", "漲跌", "今天"]):
+        return "請用 `/quotes` 查詢所有追蹤股今日報價，或 `/q 股票代號` 查詢單一股票"
+    if any(k in msg_lower for k in ["篩選", "選股", "結果"]):
+        return "請用 `/today` 查看最新篩選結果，或 `/run` 立即觸發篩選"
+    return "您好！我是台股動量篩選助理 📊\n輸入 /help 查看所有指令，或直接問我問題。"
+
 
 async def _handle_update(update: dict):
     msg  = update.get("message") or update.get("edited_message", {})
@@ -88,13 +149,21 @@ async def _handle_update(update: dict):
 
     if text.startswith("/start") or text.startswith("/help"):
         await send_message(
-            "📊 *尾盤動量篩選機器人*\n\n"
-            "指令：\n"
+            "📊 *尾盤動量篩選機器人 v2.0*\n\n"
+            "*📈 篩選功能*\n"
             "`/today` — 今日篩選結果\n"
             "`/history` — 近 5 日紀錄\n"
-            "`/run` — 立即觸發篩選\n"
+            "`/run` — 立即觸發篩選\n\n"
+            "*💰 報價功能*\n"
+            "`/quotes` — 所有追蹤股今日漲跌\n"
+            "`/q 代號` — 查單一股票（如 `/q 2330`）\n\n"
+            "*🏦 法人籌碼*\n"
+            "`/foreign 代號` — 外資買賣超+持股比例\n"
+            "`/institutional 代號` — 三大法人明細\n\n"
+            "*⚙️ 系統功能*\n"
             "`/stocks` — 追蹤股票清單\n"
-            "`/config` — 目前篩選參數",
+            "`/config` — 篩選參數\n\n"
+            "💬 也可以直接輸入問題，我會盡力回答！",
             chat_id=chat_id,
         )
 
@@ -137,6 +206,110 @@ async def _handle_update(update: dict):
         for r in rows:
             lines.append(f"{r['screen_date']}  {r['cnt']} 檔  最高分 {float(r['top_score']):.3f}")
         await send_message("\n".join(lines), chat_id=chat_id)
+
+    elif text.startswith("/quotes"):
+        rows = await fetch_all(
+            "SELECT stock_code, stock_name FROM stocks WHERE is_active=TRUE ORDER BY stock_code"
+        )
+        if not rows:
+            await send_message("股票池為空", chat_id=chat_id)
+            return
+        await send_message("⏳ 抓取報價中...", chat_id=chat_id)
+        codes = [r["stock_code"] for r in rows]
+        name_map = {r["stock_code"]: r["stock_name"] for r in rows}
+        quotes = await fetch_all_quotes(codes)
+
+        up   = [(c, q) for c, q in quotes.items() if q["change_pct"] > 0]
+        down = [(c, q) for c, q in quotes.items() if q["change_pct"] < 0]
+        flat = [(c, q) for c, q in quotes.items() if q["change_pct"] == 0]
+        up.sort(key=lambda x: x[1]["change_pct"], reverse=True)
+        down.sort(key=lambda x: x[1]["change_pct"])
+
+        lines = [f"📊 *追蹤股今日報價*（{len(quotes)}/{len(codes)} 筆）\n"]
+        if up:
+            lines.append("🟢 *上漲*")
+            for c, q in up[:10]:
+                lines.append(f"`{c}` {name_map.get(c,'')} {q['close']} *+{q['change_pct']:.1f}%* 量{q['volume']}張")
+        if down:
+            lines.append("\n🔴 *下跌*")
+            for c, q in down[:10]:
+                lines.append(f"`{c}` {name_map.get(c,'')} {q['close']} *{q['change_pct']:.1f}%* 量{q['volume']}張")
+        if flat:
+            lines.append(f"\n⬜ 平盤：{len(flat)} 檔")
+        await send_message("\n".join(lines), chat_id=chat_id)
+
+    elif text.startswith("/q "):
+        code = text.split()[1].strip()
+        q = await fetch_quote(code)
+        rows = await fetch_all("SELECT stock_name FROM stocks WHERE stock_code=$1", code)
+        name = rows[0]["stock_name"] if rows else ""
+        if not q:
+            await send_message(f"❌ 找不到 {code} 的報價", chat_id=chat_id)
+            return
+        sign = "+" if q["change_pct"] >= 0 else ""
+        emoji = "🟢" if q["change_pct"] > 0 else ("🔴" if q["change_pct"] < 0 else "⬜")
+        await send_message(
+            f"{emoji} *{code} {name or q.get('name','')}*\n"
+            f"現價：*{q['close']}*  {sign}{q['change']:.2f} ({sign}{q['change_pct']:.2f}%)\n"
+            f"開高低：{q['open']} / {q['high']} / {q['low']}\n"
+            f"成交量：{q['volume']} 張",
+            chat_id=chat_id,
+        )
+
+    elif text.startswith("/foreign"):
+        parts = text.split()
+        if len(parts) < 2:
+            await send_message("用法：`/foreign 股票代號`，例如 `/foreign 2330`", chat_id=chat_id)
+            return
+        code = parts[1].strip()
+        _tz  = datetime.timezone(datetime.timedelta(hours=8))
+        td   = datetime.datetime.now(_tz).date()
+        await send_message(f"⏳ 查詢 {code} 外資資料...", chat_id=chat_id)
+        flows  = await fetch_institutional_flows(code, td)
+        holding = await fetch_foreign_shareholding(code)
+
+        net = flows.get("foreign_net", 0)
+        consec = flows.get("foreign_consec", 0)
+        ratio  = holding.get("foreign_ratio", "N/A")
+        consec_str = (f"連買 {consec} 日 📈" if consec > 0
+                      else (f"連賣 {abs(consec)} 日 📉" if consec < 0 else "持平"))
+        net_str = f"+{net:,}" if net >= 0 else f"{net:,}"
+
+        await send_message(
+            f"🏦 *{code} 外資籌碼*（{td}）\n\n"
+            f"外資買超：{flows.get('foreign_buy',0):,} 張\n"
+            f"外資賣超：{flows.get('foreign_sell',0):,} 張\n"
+            f"外資買賣超：*{net_str} 張*\n"
+            f"外資動向：{consec_str}\n\n"
+            f"投信買賣超：{flows.get('trust_net',0):,} 張\n"
+            f"自營商買賣超：{flows.get('dealer_net',0):,} 張\n"
+            f"三大法人合計：{flows.get('total_net',0):,} 張\n\n"
+            f"外資持股比例：*{ratio}%*\n"
+            f"（資料日期：{holding.get('date','N/A')}）",
+            chat_id=chat_id,
+        )
+
+    elif text.startswith("/institutional"):
+        parts = text.split()
+        if len(parts) < 2:
+            await send_message("用法：`/institutional 股票代號`", chat_id=chat_id)
+            return
+        code = parts[1].strip()
+        _tz  = datetime.timezone(datetime.timedelta(hours=8))
+        td   = datetime.datetime.now(_tz).date()
+        flows = await fetch_institutional_flows(code, td)
+        total = flows.get("total_net", 0)
+        sign  = "+" if total >= 0 else ""
+        await send_message(
+            f"📋 *{code} 三大法人買賣超*（{td}）\n\n"
+            f"外資：*{'+' if flows.get('foreign_net',0)>=0 else ''}{flows.get('foreign_net',0):,}* 張\n"
+            f"投信：*{'+' if flows.get('trust_net',0)>=0 else ''}{flows.get('trust_net',0):,}* 張\n"
+            f"自營：*{'+' if flows.get('dealer_net',0)>=0 else ''}{flows.get('dealer_net',0):,}* 張\n"
+            f"─────────────\n"
+            f"合計：*{sign}{total:,}* 張\n"
+            f"外資連續：{flows.get('foreign_consec',0)} 日",
+            chat_id=chat_id,
+        )
 
     elif text.startswith("/run"):
         _tz_taipei = datetime.timezone(datetime.timedelta(hours=8))
@@ -187,10 +360,9 @@ async def _handle_update(update: dict):
         await send_message("\n".join(lines), chat_id=chat_id)
 
     else:
-        await send_message(
-            "❓ 未知指令。輸入 /help 查看可用指令。",
-            chat_id=chat_id,
-        )
+        # 自然語言聊天（Ollama LLM）
+        reply = await _ollama_chat(text)
+        await send_message(reply, chat_id=chat_id)
 
 
 # ── 篩選工作器 ────────────────────────────────────────────────────────────────
@@ -246,11 +418,60 @@ async def _screening_worker(trade_date: datetime.date):
             )
 
 
+async def _update_institutional_cache(trade_date: datetime.date):
+    """批量更新所有追蹤股的法人資料到 DB 快取。"""
+    stocks = await fetch_all("SELECT stock_code FROM stocks WHERE is_active=TRUE")
+    logger.info(f"[法人] 開始更新 {len(stocks)} 檔法人資料")
+    sem = asyncio.Semaphore(5)
+
+    async def _one(code):
+        async with sem:
+            try:
+                flows   = await fetch_institutional_flows(code, trade_date)
+                holding = await fetch_foreign_shareholding(code)
+                await execute("""
+                    INSERT INTO institutional_daily
+                        (stock_code, trade_date, foreign_buy, foreign_sell,
+                         foreign_net, trust_net, dealer_net, total_net,
+                         foreign_consec, foreign_ratio)
+                    VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
+                    ON CONFLICT (stock_code, trade_date) DO UPDATE SET
+                        foreign_buy   = EXCLUDED.foreign_buy,
+                        foreign_sell  = EXCLUDED.foreign_sell,
+                        foreign_net   = EXCLUDED.foreign_net,
+                        trust_net     = EXCLUDED.trust_net,
+                        dealer_net    = EXCLUDED.dealer_net,
+                        total_net     = EXCLUDED.total_net,
+                        foreign_consec = EXCLUDED.foreign_consec,
+                        foreign_ratio = EXCLUDED.foreign_ratio,
+                        updated_at    = NOW()
+                """,
+                code, trade_date,
+                flows.get("foreign_buy", 0),
+                flows.get("foreign_sell", 0),
+                flows.get("foreign_net", 0),
+                flows.get("trust_net", 0),
+                flows.get("dealer_net", 0),
+                flows.get("total_net", 0),
+                flows.get("foreign_consec", 0),
+                holding.get("foreign_ratio"),
+                )
+            except Exception as e:
+                logger.warning(f"[法人] {code} 更新失敗: {e}")
+
+    await asyncio.gather(*[_one(r["stock_code"]) for r in stocks])
+    logger.info(f"[法人] {trade_date} 法人資料更新完成")
+
+
 async def _scheduled_run():
     _tz_taipei = datetime.timezone(datetime.timedelta(hours=8))
     today = datetime.datetime.now(_tz_taipei).date()
     logger.info(f"[排程] 22:00 自動觸發篩選：{today}")
-    await _screening_worker(today)
+    # 並行執行篩選 + 法人資料更新
+    await asyncio.gather(
+        _screening_worker(today),
+        _update_institutional_cache(today),
+    )
 
 
 # ── Lifespan ──────────────────────────────────────────────────────────────────
@@ -346,6 +567,19 @@ async def trigger_run(req: RunRequest, background_tasks: BackgroundTasks):
     return {"status": "已排入執行", "date": str(td)}
 
 
+@app.post("/institutional/refresh")
+async def refresh_institutional(
+    background_tasks: BackgroundTasks,
+    trade_date: Optional[str] = Query(None),
+):
+    """手動觸發法人資料更新。"""
+    _tz = datetime.timezone(datetime.timedelta(hours=8))
+    td  = (datetime.date.fromisoformat(trade_date)
+           if trade_date else datetime.datetime.now(_tz).date())
+    background_tasks.add_task(_update_institutional_cache, td)
+    return {"status": "已排入更新", "date": str(td)}
+
+
 @app.get("/results")
 async def get_results(
     screen_date: Optional[str] = Query(None, description="YYYY-MM-DD，預設最新一日"),
@@ -409,6 +643,89 @@ async def setup_webhook(url: str = Query(..., description="https://你的域名/
 @app.get("/setup/bot")
 async def bot_info():
     return await get_me()
+
+
+# ── 報價端點 ──────────────────────────────────────────────────────────────────
+
+@app.get("/stocks/quotes")
+async def stocks_quotes():
+    """所有追蹤股當日報價、漲跌幅、成交量。"""
+    rows = await fetch_all(
+        "SELECT stock_code, stock_name, market FROM stocks WHERE is_active=TRUE ORDER BY stock_code"
+    )
+    if not rows:
+        return []
+    codes    = [r["stock_code"] for r in rows]
+    name_map = {r["stock_code"]: r["stock_name"] for r in rows}
+    mkt_map  = {r["stock_code"]: r["market"]     for r in rows}
+    quotes   = await fetch_all_quotes(codes)
+
+    result = []
+    for code in codes:
+        q = quotes.get(code)
+        if q:
+            result.append({
+                "stock_code":  code,
+                "stock_name":  name_map.get(code, ""),
+                "market":      mkt_map.get(code, ""),
+                **q,
+            })
+        else:
+            result.append({
+                "stock_code": code,
+                "stock_name": name_map.get(code, ""),
+                "market":     mkt_map.get(code, ""),
+                "close": None, "change_pct": None, "volume": None,
+            })
+    return result
+
+
+@app.get("/stocks/quotes/{stock_code}")
+async def stock_quote(stock_code: str):
+    """單一股票即時報價。"""
+    return await fetch_quote(stock_code)
+
+
+# ── 法人籌碼端點 ──────────────────────────────────────────────────────────────
+
+@app.get("/institutional/{stock_code}")
+async def institutional_data(
+    stock_code: str,
+    trade_date: Optional[str] = Query(None, description="YYYY-MM-DD"),
+):
+    """三大法人買賣超（外資/投信/自營）。"""
+    _tz = datetime.timezone(datetime.timedelta(hours=8))
+    td  = (datetime.date.fromisoformat(trade_date)
+           if trade_date else datetime.datetime.now(_tz).date())
+    flows = await fetch_institutional_flows(stock_code, td)
+    return {"stock_code": stock_code, "trade_date": str(td), **flows}
+
+
+@app.get("/foreign-holding/{stock_code}")
+async def foreign_holding(stock_code: str):
+    """外資持股比例（%）。"""
+    return await fetch_foreign_shareholding(stock_code)
+
+
+@app.get("/institutional/summary")
+async def institutional_summary(
+    trade_date: Optional[str] = Query(None),
+    limit: int = Query(20, le=53),
+):
+    """所有追蹤股的法人籌碼摘要（從 DB 快取取）。"""
+    _tz = datetime.timezone(datetime.timedelta(hours=8))
+    td  = (datetime.date.fromisoformat(trade_date)
+           if trade_date else datetime.datetime.now(_tz).date())
+    return await fetch_all("""
+        SELECT i.stock_code, s.stock_name,
+               i.foreign_net, i.trust_net, i.dealer_net, i.total_net,
+               i.foreign_consec, i.foreign_ratio, i.trade_date
+        FROM institutional_daily i
+        JOIN stocks s ON s.stock_code = i.stock_code
+        WHERE i.trade_date = $1 AND s.is_active = TRUE
+        ORDER BY i.total_net DESC
+        LIMIT $2
+    """, td, limit)
 
 
 # ── 診斷端點 ──────────────────────────────────────────────────────────────────
