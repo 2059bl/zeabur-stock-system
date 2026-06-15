@@ -114,7 +114,7 @@ async def get_recent_news(stock_code: str, days: int = 5) -> list[dict]:
     return await fetch_all("""
         SELECT title, source, sentiment, news_date
         FROM news_cache
-        WHERE stock_code = $1 AND news_date >= CURRENT_DATE - $2
+        WHERE stock_code = $1 AND news_date >= CURRENT_DATE - $2::integer
         ORDER BY news_date DESC, id DESC
         LIMIT 10
     """, stock_code, days)
