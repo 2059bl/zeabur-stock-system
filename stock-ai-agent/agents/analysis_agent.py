@@ -28,11 +28,12 @@ async def run_analysis(stock_code: str, trade_date: str) -> dict:
 
     await execute("""
         INSERT INTO stock_indicators
-            (stock_code, trade_date, sma_5, sma_20, sma_60, sma_120,
+            (stock_code, trade_date, sma_5, sma_10, sma_20, sma_60, sma_120,
              rsi_14, macd, macd_signal, macd_histogram, bias_rate, short_trend_confirmed)
-        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
+        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
         ON CONFLICT (stock_code, trade_date) DO UPDATE SET
             sma_5              = EXCLUDED.sma_5,
+            sma_10             = EXCLUDED.sma_10,
             sma_20             = EXCLUDED.sma_20,
             sma_60             = EXCLUDED.sma_60,
             sma_120            = EXCLUDED.sma_120,
@@ -44,7 +45,7 @@ async def run_analysis(stock_code: str, trade_date: str) -> dict:
             short_trend_confirmed = EXCLUDED.short_trend_confirmed,
             updated_at         = NOW()
     """, stock_code, td,
-         ind["sma_5"], ind["sma_20"], ind["sma_60"], ind["sma_120"],
+         ind["sma_5"], ind["sma_10"], ind["sma_20"], ind["sma_60"], ind["sma_120"],
          ind["rsi_14"], ind["macd"], ind["macd_signal"], ind["macd_histogram"],
          ind["bias_rate"], ind["short_trend_confirmed"])
 

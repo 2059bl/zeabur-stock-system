@@ -47,16 +47,21 @@ def macd_fixed(prices: list[float], fast=12, slow=26, signal=9) -> dict:
 
 def compute_all(prices_ohlcv: list[dict]) -> dict:
     closes = [r["close_price"] for r in prices_ohlcv]
-    s5, s20, s60, s120 = sma(closes, 5), sma(closes, 20), sma(closes, 60), sma(closes, 120)
+    s5  = sma(closes, 5)
+    s10 = sma(closes, 10)
+    s20 = sma(closes, 20)
+    s60 = sma(closes, 60)
+    s120 = sma(closes, 120)
     m = macd_fixed(closes)
     return {
-        "sma_5": s5,
-        "sma_20": s20,
-        "sma_60": s60,
+        "sma_5":   s5,
+        "sma_10":  s10,
+        "sma_20":  s20,
+        "sma_60":  s60,
         "sma_120": s120,
-        "rsi_14": rsi(closes),
-        "macd": m["macd"],
-        "macd_signal": m["signal"],
+        "rsi_14":  rsi(closes),
+        "macd":         m["macd"],
+        "macd_signal":  m["signal"],
         "macd_histogram": m["histogram"],
         "bias_rate": round((closes[-1] - s20) / s20 * 100, 2) if s20 else None,
         "short_trend_confirmed": (

@@ -17,6 +17,7 @@ from agents.bear_agent import run_dynamic_screening
 from agents.decision_agent import run_cloud_decision
 from agents.news_agent import run_news_sentiment, get_recent_news
 from agents.scoring_agent import update_composite_scores
+from agents.momentum_agent import run_momentum_screening, calculate_momentum_returns, CFG as MOMENTUM_CFG
 from utils.signals import compute_market_bear_signal
 from utils.notifier import send_telegram, get_chat_id
 from utils.chatbot import send_message, chat_with_llm, set_webhook
@@ -39,19 +40,34 @@ scheduler = AsyncIOScheduler(timezone=SCHEDULE_TZ)
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     await get_pool()
+    # 每日 22:00 主流程（報價→指標→籌碼→情緒→評分→AI）
     scheduler.add_job(
         _scheduled_daily_run,
         CronTrigger(hour=SCHEDULE_HOUR, minute=SCHEDULE_MINUTE, timezone=SCHEDULE_TZ),
         id="daily_pipeline",
         replace_existing=True,
     )
+    # 每日 22:10 動量篩選（主流程完成後）
+    scheduler.add_job(
+        _scheduled_momentum_run,
+        CronTrigger(hour=SCHEDULE_HOUR, minute=SCHEDULE_MINUTE + 10, timezone=SCHEDULE_TZ),
+        id="momentum_pipeline",
+        replace_existing=True,
+    )
+    # 每日 22:20 回算前一日動量報酬率
+    scheduler.add_job(
+        _scheduled_return_calc,
+        CronTrigger(hour=SCHEDULE_HOUR, minute=SCHEDULE_MINUTE + 20, timezone=SCHEDULE_TZ),
+        id="return_calc",
+        replace_existing=True,
+    )
     scheduler.start()
-    logger.info(f"排程啟動：每日 {SCHEDULE_HOUR:02d}:{SCHEDULE_MINUTE:02d} {SCHEDULE_TZ} 自動執行")
+    logger.info(f"排程啟動：主流程 {SCHEDULE_HOUR:02d}:{SCHEDULE_MINUTE:02d} / 動量 +10min / 報酬回算 +20min")
     yield
     scheduler.shutdown(wait=False)
 
 
-app = FastAPI(title="台股 AI 量化系統", version="4.0.0", lifespan=lifespan)
+app = FastAPI(title="台股 AI 量化系統", version="4.1.0", lifespan=lifespan)
 
 
 # ─── Models ───────────────────────────────────────────────────────────────────
@@ -255,6 +271,39 @@ async def setup_webhook():
     return result
 
 
+_MIGRATION_V4 = """
+ALTER TABLE stocks
+    ADD COLUMN IF NOT EXISTS shares_outstanding BIGINT,
+    ADD COLUMN IF NOT EXISTS float_shares       BIGINT;
+ALTER TABLE stock_indicators
+    ADD COLUMN IF NOT EXISTS sma_10 NUMERIC(10,2);
+CREATE TABLE IF NOT EXISTS momentum_candidates (
+    id               BIGSERIAL PRIMARY KEY,
+    screen_date      DATE NOT NULL,
+    rank             INT,
+    stock_code       VARCHAR(10) REFERENCES stocks(stock_code),
+    stock_name       VARCHAR(50),
+    sector           VARCHAR(50),
+    daily_return     NUMERIC(6,4),
+    volume_ratio     NUMERIC(6,2),
+    turnover_rate    NUMERIC(6,4),
+    market_cap_bn    NUMERIC(10,1),
+    relative_strength NUMERIC(6,4),
+    momentum_score   NUMERIC(6,4),
+    rsi_14           NUMERIC(6,2),
+    macd_histogram   NUMERIC(10,4),
+    ma_slope_5       NUMERIC(8,3),
+    ma_slope_10      NUMERIC(8,3),
+    ma_slope_20      NUMERIC(8,3),
+    return_1d        NUMERIC(6,2),
+    return_3d        NUMERIC(6,2),
+    return_5d        NUMERIC(6,2),
+    updated_at       TIMESTAMPTZ DEFAULT NOW(),
+    UNIQUE(screen_date, stock_code)
+);
+CREATE INDEX IF NOT EXISTS idx_momentum_date ON momentum_candidates(screen_date DESC)
+"""
+
 _MIGRATION_V3 = """
 DROP VIEW IF EXISTS bear_strategy_candidates CASCADE;
 DROP VIEW IF EXISTS latest_indicators CASCADE;
@@ -323,8 +372,9 @@ ORDER BY li.composite_score DESC NULLS LAST, li.bear_signal_score DESC NULLS LAS
 
 @app.post("/setup/migrate")
 async def run_migration():
-    """執行 migration v3：新增外資持股、評分、新聞、回測等欄位與表格。"""
-    statements = [s.strip() for s in _MIGRATION_V3.split(";") if s.strip() and not s.strip().startswith("--")]
+    """執行所有 migration（v3+v4）。"""
+    all_sql = _MIGRATION_V3 + ";" + _MIGRATION_V4
+    statements = [s.strip() for s in all_sql.split(";") if s.strip() and not s.strip().startswith("--")]
     errors = []
     for stmt in statements:
         try:
@@ -332,6 +382,79 @@ async def run_migration():
         except Exception as e:
             errors.append(str(e)[:200])
     return {"status": "done", "statements": len(statements), "errors": errors}
+
+
+# ─── Momentum 動量篩選 ────────────────────────────────────────────────────────
+
+@app.post("/momentum/run")
+async def trigger_momentum(req: RunRequest, background_tasks: BackgroundTasks):
+    """手動觸發尾盤動量篩選。"""
+    target_date = req.trade_date or str(date.today())
+    background_tasks.add_task(_momentum_worker, target_date)
+    return {"status": "動量篩選已排入背景", "date": target_date}
+
+
+@app.get("/momentum/candidates")
+async def momentum_candidates(screen_date: Optional[str] = Query(None, description="YYYY-MM-DD，預設今日")):
+    """查看指定日期的動量候選股。"""
+    td = screen_date or str(date.today())
+    return await fetch_all("""
+        SELECT * FROM momentum_candidates
+        WHERE screen_date = $1::date
+        ORDER BY rank ASC
+    """, td)
+
+
+@app.get("/momentum/history")
+async def momentum_history(days: int = Query(10, le=60)):
+    """查看近 N 日篩選結果與實際報酬率驗證。"""
+    return await fetch_all("""
+        SELECT
+            screen_date, rank, stock_code, stock_name, sector,
+            daily_return, volume_ratio, turnover_rate, market_cap_bn,
+            relative_strength, momentum_score,
+            return_1d, return_3d, return_5d
+        FROM momentum_candidates
+        WHERE screen_date >= CURRENT_DATE - $1
+        ORDER BY screen_date DESC, rank ASC
+    """, days)
+
+
+@app.get("/momentum/stats")
+async def momentum_stats():
+    """回算策略勝率統計（有報酬率資料的歷史記錄）。"""
+    rows = await fetch_all("""
+        SELECT
+            COUNT(*) AS total_signals,
+            COUNT(return_1d) AS verified,
+            ROUND(AVG(return_1d)::numeric, 2) AS avg_1d,
+            ROUND(AVG(return_3d)::numeric, 2) AS avg_3d,
+            ROUND(AVG(return_5d)::numeric, 2) AS avg_5d,
+            ROUND(
+                SUM(CASE WHEN return_1d > 0 THEN 1 ELSE 0 END)::numeric
+                / NULLIF(COUNT(return_1d), 0) * 100, 1
+            ) AS win_rate_1d,
+            ROUND(
+                SUM(CASE WHEN return_3d > 0 THEN 1 ELSE 0 END)::numeric
+                / NULLIF(COUNT(return_3d), 0) * 100, 1
+            ) AS win_rate_3d
+        FROM momentum_candidates
+    """)
+    return rows[0] if rows else {}
+
+
+@app.get("/momentum/config")
+async def momentum_config():
+    """查看當前動量篩選參數設定。"""
+    return {
+        "漲幅區間":     f"{MOMENTUM_CFG['return_min']*100:.0f}% ~ {MOMENTUM_CFG['return_max']*100:.0f}%",
+        "量比下限":     MOMENTUM_CFG['volume_ratio_min'],
+        "換手率區間":   f"{MOMENTUM_CFG['turnover_min']*100:.0f}% ~ {MOMENTUM_CFG['turnover_max']*100:.0f}%",
+        "市值區間(億)": f"{MOMENTUM_CFG['mktcap_min']/1e8:.0f} ~ {MOMENTUM_CFG['mktcap_max']/1e8:.0f}",
+        "RSI上限":     MOMENTUM_CFG['rsi_max'],
+        "輸出檔數":    MOMENTUM_CFG['top_n'],
+        "台階量誤差":  f"±{MOMENTUM_CFG['vol_slope_tolerance']*100:.0f}%",
+    }
 
 
 @app.post("/telegram/webhook")
@@ -579,17 +702,20 @@ async def _handle_telegram_update(update: dict):
 
     if text.startswith("/start") or text.startswith("/help"):
         await send_message(chat_id, (
-            "👋 *台股 AI 量化助理 v4.0*\n\n"
+            "👋 *台股 AI 量化助理 v4.1*\n\n"
             "直接用中文問我，例如：\n"
             "「現在有哪些空頭股票？」\n"
             "「2330 外資最近在做什麼？」\n"
             "「RSI 和空頭排列怎麼看？」\n\n"
-            "📌 *快捷指令*\n"
-            "/stocks — 追蹤的 50 檔股票\n"
-            "/screen — 今日空頭候選（含評分）\n"
-            "/top — 綜合評分 TOP 10\n"
-            "/market — 大盤氛圍與期貨外資\n"
-            "/run — 立即觸發今日分析\n"
+            "📌 *空頭策略指令*\n"
+            "/screen — 今日空頭排列候選（含評分）\n"
+            "/top — 空頭綜合評分 TOP 10\n\n"
+            "📈 *動量策略指令*\n"
+            "/momentum — 今日尾盤動量突破候選股\n\n"
+            "📊 *市場與帳戶指令*\n"
+            "/stocks — 追蹤的全部股票\n"
+            "/market — 大盤氛圍與期貨外資部位\n"
+            "/run — 立即觸發今日完整分析\n"
             "/help — 顯示此說明"
         ))
         return
@@ -658,6 +784,26 @@ async def _handle_telegram_update(update: dict):
         ))
         return
 
+    if text.startswith("/momentum"):
+        today = str(date.today())
+        rows = await fetch_all("""
+            SELECT rank, stock_code, stock_name, daily_return, volume_ratio,
+                   relative_strength, momentum_score, market_cap_bn
+            FROM momentum_candidates WHERE screen_date = $1::date ORDER BY rank ASC
+        """, today)
+        if not rows:
+            await send_message(chat_id,
+                f"📈 *動量篩選 {today}*\n今日尚無資料，請稍後或傳送 /run 觸發分析。")
+        else:
+            lines = [f"📈 *尾盤動量候選股 {today}*\n"]
+            for r in rows:
+                ret = f"+{float(r['daily_return'])*100:.1f}%" if r.get('daily_return') else '—'
+                vr  = f"{float(r['volume_ratio']):.1f}倍" if r.get('volume_ratio') else '—'
+                sc  = f"{float(r['momentum_score']):.2f}" if r.get('momentum_score') else '—'
+                lines.append(f"#{r['rank']} `{r['stock_code']}` *{r['stock_name']}*  漲:{ret}  量比:{vr}  評分:{sc}")
+            await send_message(chat_id, "\n".join(lines))
+        return
+
     if text.startswith("/run"):
         today = str(date.today())
         await send_message(chat_id, f"⚙️ 已觸發 {today} 分析，約 2-3 分鐘後推播結果。")
@@ -719,6 +865,48 @@ async def _scheduled_daily_run():
     today = str(date.today())
     logger.info(f"[排程] 自動觸發: {today}")
     await _pipeline_worker(today)
+
+
+async def _scheduled_momentum_run():
+    today = str(date.today())
+    logger.info(f"[排程] 動量篩選觸發: {today}")
+    await _momentum_worker(today)
+
+
+async def _scheduled_return_calc():
+    """計算昨日動量候選的實際報酬率。"""
+    from datetime import timedelta
+    yesterday = str(date.today() - timedelta(days=1))
+    logger.info(f"[排程] 報酬率回算: {yesterday}")
+    await calculate_momentum_returns(yesterday)
+
+
+async def _momentum_worker(trade_date: str):
+    """動量篩選背景 worker：篩選 → 推播 Telegram。"""
+    try:
+        candidates = await run_momentum_screening(trade_date)
+        if not candidates:
+            logger.info("[Momentum] 今日無符合條件的動量標的")
+            await send_telegram(f"📈 *動量篩選 {trade_date}*\n今日無符合條件標的（市場動能不足或休市）")
+            return
+
+        lines = [f"📈 *尾盤動量突破候選股 {trade_date}*\n（7道過濾器，按綜合評分排序）\n"]
+        for c in candidates:
+            ret  = f"+{c['daily_return']*100:.1f}%" if c.get('daily_return') else '—'
+            vr   = f"{c['volume_ratio']:.1f}倍" if c.get('volume_ratio') else '—'
+            rs   = f"+{c['relative_strength']*100:.1f}%" if c.get('relative_strength') else '—'
+            sc   = f"{c['momentum_score']:.2f}" if c.get('momentum_score') else '—'
+            cap  = f"{c['market_cap_bn']:.0f}億" if c.get('market_cap_bn') else '—'
+            lines.append(
+                f"#{c.get('rank',0)} `{c['stock_code']}` *{c['stock_name']}*\n"
+                f"   漲幅:{ret}  量比:{vr}  超額:{rs}  市值:{cap}  評分:{sc}"
+            )
+        lines.append("\n_📌 以上為次日監控自選股池，僅供參考，請自行判斷風險_")
+        await send_telegram("\n".join(lines))
+        logger.info(f"[Momentum] 推播 {len(candidates)} 檔候選")
+
+    except Exception as e:
+        logger.exception(f"[Momentum] Worker 失敗: {e}")
 
 
 async def _run_with_semaphore(sem: asyncio.Semaphore, coro):
