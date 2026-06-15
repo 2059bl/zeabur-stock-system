@@ -39,8 +39,9 @@ async def _yahoo_ohlcv(stock_code: str) -> list[dict]:
                     c_val = q["close"][i]
                     if c_val is None:
                         continue
+                    _tz8 = datetime.timezone(datetime.timedelta(hours=8))
                     rows.append({
-                        "date":   datetime.date.fromtimestamp(ts),
+                        "date":   datetime.datetime.fromtimestamp(ts, tz=_tz8).date(),
                         "open":   round(q["open"][i] or 0, 2),
                         "high":   round(q["high"][i] or 0, 2),
                         "low":    round(q["low"][i] or 0, 2),
@@ -138,8 +139,12 @@ async def fetch_market_return(trade_date: datetime.date) -> float:
                 return 0.0
             ts_list = result[0].get("timestamp", [])
             closes  = result[0]["indicators"]["quote"][0]["close"]
+            # Yahoo timestamps are UTC; Taiwan market closes at 13:30 CST = 05:30 UTC
+            # Use UTC+8 to match the correct trading date
+            _tz8 = datetime.timezone(datetime.timedelta(hours=8))
             for i, ts in enumerate(ts_list):
-                if datetime.date.fromtimestamp(ts) == trade_date and i > 0:
+                ts_date = datetime.datetime.fromtimestamp(ts, tz=_tz8).date()
+                if ts_date == trade_date and i > 0:
                     prev = closes[i - 1]
                     curr = closes[i]
                     if prev and curr:
