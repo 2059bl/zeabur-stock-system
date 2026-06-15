@@ -463,6 +463,33 @@ async def _update_institutional_cache(trade_date: datetime.date):
     logger.info(f"[法人] {trade_date} 法人資料更新完成")
 
 
+async def _foreign_sell_alert(trade_date: datetime.date, threshold: int = 5):
+    """外資連賣預警：連賣天數 ≥ threshold 的股票推播到 Telegram。"""
+    rows = await fetch_all("""
+        SELECT d.stock_code, s.stock_name, d.foreign_consec, d.foreign_net
+        FROM institutional_daily d
+        JOIN stocks s ON s.stock_code = d.stock_code
+        WHERE d.trade_date = $1
+          AND d.foreign_consec <= -$2
+        ORDER BY d.foreign_consec ASC
+    """, trade_date, threshold)
+
+    if not rows:
+        logger.info(f"[預警] {trade_date} 無外資連賣 ≥{threshold} 日的股票")
+        return
+
+    lines = [f"⚠️ *外資連賣預警*（{trade_date}）\n"]
+    lines.append(f"以下股票外資連賣 ≥ {threshold} 日，請注意籌碼風險：\n")
+    for r in rows:
+        net_str = f"{r['foreign_net']:,}" if r['foreign_net'] >= 0 else f"{r['foreign_net']:,}"
+        lines.append(
+            f"🔴 `{r['stock_code']}` {r['stock_name']} "
+            f"連賣 *{abs(r['foreign_consec'])} 日*  今日：{net_str} 張"
+        )
+    await send_message("\n".join(lines))
+    logger.info(f"[預警] 推播外資連賣預警：{len(rows)} 檔")
+
+
 async def _scheduled_run():
     _tz_taipei = datetime.timezone(datetime.timedelta(hours=8))
     today = datetime.datetime.now(_tz_taipei).date()
@@ -472,6 +499,8 @@ async def _scheduled_run():
         _screening_worker(today),
         _update_institutional_cache(today),
     )
+    # 法人資料更新完成後推播外資連賣預警
+    await _foreign_sell_alert(today)
 
 
 # ── Lifespan ──────────────────────────────────────────────────────────────────
@@ -578,6 +607,19 @@ async def refresh_institutional(
            if trade_date else datetime.datetime.now(_tz).date())
     background_tasks.add_task(_update_institutional_cache, td)
     return {"status": "已排入更新", "date": str(td)}
+
+
+@app.post("/institutional/alert")
+async def trigger_foreign_alert(
+    trade_date: Optional[str] = Query(None),
+    threshold: int = Query(5, description="連賣天數門檻，預設 5 日"),
+):
+    """手動觸發外資連賣預警推播。"""
+    _tz = datetime.timezone(datetime.timedelta(hours=8))
+    td  = (datetime.date.fromisoformat(trade_date)
+           if trade_date else datetime.datetime.now(_tz).date())
+    await _foreign_sell_alert(td, threshold)
+    return {"status": "預警推播完成", "date": str(td), "threshold": threshold}
 
 
 @app.get("/results")

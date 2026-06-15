@@ -32,8 +32,8 @@ CFG = {
     # Step 3
     "turnover_min":      0.05,
     "turnover_max":      0.10,
-    # Step 4
-    "mktcap_min":        25e9,
+    # Step 4（100億~2500億，涵蓋小型成長股）
+    "mktcap_min":        10e9,
     "mktcap_max":        250e9,
     # Step 5
     "vol_slope_tolerance": 0.05,   # 允許 5% 誤差
