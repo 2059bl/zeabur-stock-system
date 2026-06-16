@@ -1,6 +1,8 @@
 """
-FinMind 財報資料（EPS、ROE、獲利成長、股本）
-Datasets: TaiwanStockFinancialStatements, TaiwanStockInfo
+FinMind 財報資料（EPS、ROE、獲利成長、股本、負債比）
+Datasets:
+  TaiwanStockFinancialStatements  → EPS、H1 淨利
+  TaiwanStockBalanceSheet         → 負債比、股本、股東權益
 """
 import os
 import httpx
@@ -34,75 +36,104 @@ async def _fm_get(dataset: str, stock_code: str,
         return []
 
 
+def _pick(rows: list[dict], type_name: str) -> list[dict]:
+    """Filter rows by type field (tall-format FinMind data)."""
+    return [r for r in rows if r.get("type") == type_name]
+
+
+def _latest_val(rows: list[dict], type_name: str) -> float | None:
+    matches = sorted(_pick(rows, type_name), key=lambda x: x.get("date", ""))
+    return float(matches[-1]["value"]) if matches and matches[-1].get("value") is not None else None
+
+
 async def fetch_financials(stock_code: str) -> dict:
     """
-    取得最新財報指標：EPS（Q1）、ROE、上半年獲利成長、負債比。
-    回傳：{q1_eps, roe, h1_profit_growth_pct, debt_ratio,
-            h1_profit_this, h1_profit_last, report_date}
+    取得最新財報指標：EPS（Q1）、ROE（估算）、H1 獲利成長、負債比。
+    資料來源：TaiwanStockFinancialStatements + TaiwanStockBalanceSheet（tall format）
     """
     end   = datetime.date.today()
     start = end.replace(year=end.year - 2)
-    rows  = await _fm_get("TaiwanStockFinancialStatements", stock_code, start, end)
 
-    if not rows:
+    income_rows, bs_rows = await _parallel_fetch(stock_code, start, end)
+
+    if not income_rows and not bs_rows:
         return {}
 
-    # 依 date 排序
-    rows = sorted(rows, key=lambda x: x.get("date", ""))
+    # ── EPS：Q1 = 日期含 -03- 的最新一筆 ─────────────────────────────────────
+    eps_q1_rows = sorted(
+        [r for r in _pick(income_rows, "EPS") if "-03-" in r.get("date", "")],
+        key=lambda x: x["date"],
+    )
+    q1_eps = float(eps_q1_rows[-1]["value"]) if eps_q1_rows else None
 
-    def _val(row: dict, field: str) -> float:
-        return float(row.get(field, 0) or 0)
+    # ── 負債比：Liabilities_per（已是 %） ─────────────────────────────────────
+    debt_ratio = _latest_val(bs_rows, "Liabilities_per")
 
-    # 找 Q1（type = season, date 含 Q1 = 3月底）
-    q1_rows = [r for r in rows if r.get("type") == "season" and "-03-" in r.get("date", "")]
-    q1_eps  = _val(q1_rows[-1], "EPS") if q1_rows else None
+    # ── 股東權益（最新） ──────────────────────────────────────────────────────
+    equity_rows = sorted(_pick(bs_rows, "EquityAttributableToOwnersOfParent"),
+                         key=lambda x: x.get("date", ""))
+    equity = float(equity_rows[-1]["value"]) if equity_rows else None
 
-    # ROE（最新一季）
-    season_rows = [r for r in rows if r.get("type") == "season"]
-    roe = _val(season_rows[-1], "ROE") if season_rows else None
+    # ── ROE = (Q1淨利 × 4) / 股東權益（近似年化） ────────────────────────────
+    net_income_q1_rows = sorted(
+        [r for r in _pick(income_rows, "IncomeAfterTaxes") if "-03-" in r.get("date", "")],
+        key=lambda x: x["date"],
+    )
+    roe = None
+    if net_income_q1_rows and equity and equity > 0:
+        ni_q1 = float(net_income_q1_rows[-1]["value"])
+        roe   = round(ni_q1 * 4 / equity * 100, 2)
 
-    # 負債比（最新一季）
-    debt_ratio = _val(season_rows[-1], "DebtRatio") if season_rows else None
-
-    # 上半年獲利成長（H1 = Q1+Q2，type = cumulative，date 含 06-30）
+    # ── H1 獲利成長：IncomeAfterTaxes 日期含 -06- ─────────────────────────────
     h1_rows = sorted(
-        [r for r in rows if r.get("type") == "cumulative" and "-06-" in r.get("date", "")],
-        key=lambda x: x.get("date", ""),
+        [r for r in _pick(income_rows, "IncomeAfterTaxes") if "-06-" in r.get("date", "")],
+        key=lambda x: x["date"],
     )
     h1_growth = None
     h1_this   = None
     h1_last   = None
     if len(h1_rows) >= 2:
-        h1_this = _val(h1_rows[-1], "NetIncome")
-        h1_last = _val(h1_rows[-2], "NetIncome")
-        if h1_last != 0:
+        h1_this  = float(h1_rows[-1]["value"])
+        h1_last  = float(h1_rows[-2]["value"])
+        if h1_last and h1_last != 0:
             h1_growth = round((h1_this - h1_last) / abs(h1_last) * 100, 2)
 
+    report_date = eps_q1_rows[-1]["date"] if eps_q1_rows else None
+
     return {
-        "q1_eps":              q1_eps,
-        "roe":                 roe,
-        "debt_ratio":          debt_ratio,
+        "q1_eps":               q1_eps,
+        "roe":                  roe,
+        "debt_ratio":           debt_ratio,
         "h1_profit_growth_pct": h1_growth,
-        "h1_profit_this":      h1_this,
-        "h1_profit_last":      h1_last,
-        "report_date":         season_rows[-1].get("date") if season_rows else None,
+        "h1_profit_this":       h1_this,
+        "h1_profit_last":       h1_last,
+        "report_date":          report_date,
     }
+
+
+async def _parallel_fetch(stock_code: str, start: datetime.date, end: datetime.date):
+    """Fetch income statement and balance sheet concurrently."""
+    import asyncio
+    income, bs = await asyncio.gather(
+        _fm_get("TaiwanStockFinancialStatements", stock_code, start, end),
+        _fm_get("TaiwanStockBalanceSheet",        stock_code, start, end),
+    )
+    return income, bs
 
 
 async def fetch_stock_capital(stock_code: str) -> float:
     """
-    取得股本（億元）。使用 TaiwanStockInfo。
+    取得股本（億元）。
+    使用 TaiwanStockBalanceSheet → type == "CapitalStock"，單位：元。
     """
     try:
         end   = datetime.date.today()
-        start = end.replace(year=end.year - 1)
-        rows  = await _fm_get("TaiwanStockInfo", stock_code, start, end)
-        if not rows:
+        start = end.replace(year=end.year - 2)
+        rows  = await _fm_get("TaiwanStockBalanceSheet", stock_code, start, end)
+        val   = _latest_val(rows, "CapitalStock")
+        if val is None:
             return 0.0
-        latest = sorted(rows, key=lambda x: x.get("date", ""))[-1]
-        # CapitalStock 單位：元，轉換為億元
-        capital = float(latest.get("CapitalStock", 0) or 0) / 1e8
-        return round(capital, 2)
+        return round(val / 1e8, 2)
     except Exception as e:
         logger.warning(f"股本查詢失敗 {stock_code}: {e}")
         return 0.0
