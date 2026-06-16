@@ -9,5 +9,5 @@ COPY . .
 
 EXPOSE 8080
 
-# v1.0
+# v1.1
 CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8080"]
