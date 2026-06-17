@@ -30,12 +30,36 @@ logger    = logging.getLogger(__name__)
 scheduler = AsyncIOScheduler(timezone="Asia/Taipei")
 _TZ8      = datetime.timezone(datetime.timedelta(hours=8))
 
-# ── IC 三產業股票池 ────────────────────────────────────────────────────────────
+# ── 產業股票池（含四個新主題池）───────────────────────────────────────────────
+# cfg 欄位覆寫 Layer 1 門檻；不設則沿用預設值
 _IC_POOLS = [
-    {"name": "IC設計",      "description": "IC Design，包含類比、數位、混訊設計廠"},
-    {"name": "IC製造/代工",  "description": "晶圓代工與IDM製造廠"},
-    {"name": "IC封裝測試",   "description": "封裝、測試、基板廠"},
+    {"name": "IC設計",      "description": "IC Design，包含類比、數位、混訊設計廠", "cfg": {}},
+    {"name": "IC製造/代工",  "description": "晶圓代工與IDM製造廠",                  "cfg": {}},
+    {"name": "IC封裝測試",   "description": "封裝、測試、基板廠",                    "cfg": {}},
+    {
+        "name": "mSAP/ABF基板",
+        "description": "修正型半加成製程PCB與ABF載板，AI伺服器基板需求受益",
+        "cfg": {"pe_max": 25},   # 技術溢價合理，PE 放寬至 25
+    },
+    {
+        "name": "CCL銅箔基板",
+        "description": "銅箔基板材料供應鏈：玻纖布→銅箔→CCL→特殊化工",
+        "cfg": {"debt_max": 60}, # 材料/化工股資本密集，負債比放寬至 60%
+    },
+    {
+        "name": "LTA存儲板塊",
+        "description": "記憶體與存儲控制器，AI長約採購(LTA)帶動週期反轉",
+        "cfg": {"cum_growth_min": 15, "pe_max": 30},  # 週期谷底回升，門檻放寬
+    },
+    {
+        "name": "HBM伺服器",
+        "description": "HBM先進封裝測試＋AI伺服器整機供應鏈",
+        "cfg": {"vol_min": 500}, # 部分小型供應商流動性較低
+    },
 ]
+
+# 各池名稱 → cfg 映射（排程時查表）
+_POOL_CFG_BY_NAME = {p["name"]: p.get("cfg", {}) for p in _IC_POOLS}
 
 _IC_STOCKS = {
     "IC設計": [
@@ -57,6 +81,68 @@ _IC_STOCKS = {
         ("2441", "超豐"),      ("6239", "力成"),     ("8150", "南茂"),
         ("3264", "欣銓"),      ("2442", "新美齊"),   ("6271", "同欣電"),
         ("5344", "立積"),      ("3010", "華立"),     ("6214", "精材"),
+    ],
+    # ── 四個新主題池 ─────────────────────────────────────────────────────────
+    "mSAP/ABF基板": [
+        # ABF/BT 載板核心廠
+        ("3037", "欣興"),    ("8046", "南電"),    ("3189", "景碩"),
+        # 特殊積層材料/PCB 銅箔基板材料
+        ("6274", "台燿"),    ("2383", "台光電"),
+        # PCB 化學品/材料供應商
+        ("5285", "界霖"),    ("4105", "弘凱"),
+        # 多層 PCB 廠（mSAP 製程）
+        ("8261", "志超"),    ("6119", "旭碁"),    ("3533", "嘉聯益"),
+        ("2328", "廣宇"),
+    ],
+    "CCL銅箔基板": [
+        # 銅箔（電解銅箔）
+        ("2038", "海光"),
+        # CCL 積層板製造
+        ("6438", "聯茂"),    ("2383", "台光電"),  ("6274", "台燿"),
+        # 上游原材料：南亞塑膠（環氧樹脂+CCL事業部）
+        ("1303", "南亞"),
+        # 玻纖布
+        ("1325", "恆大"),
+        # 環氧樹脂
+        ("1312", "國喬"),    ("1304", "台聚"),
+        # 石化/高分子基材
+        ("1326", "台化"),
+    ],
+    "LTA存儲板塊": [
+        # DRAM 製造
+        ("2408", "南亞科"),
+        # NAND Flash 控制器
+        ("8299", "群聯"),    ("6279", "慧榮"),
+        # DRAM 模組/通路
+        ("3260", "威剛"),    ("8112", "至上"),
+        # SRAM / 特殊記憶體
+        ("3006", "晶豪科"),
+        # NOR Flash + MCU
+        ("4919", "新唐"),
+        # 特殊製程晶圓代工（記憶體周邊）
+        ("5347", "世界先進"),
+        # 主機板（記憶體平台需求端）
+        ("3515", "華擎"),
+        # 矽晶圓（DRAM 上游）
+        ("5483", "中美晶"),
+    ],
+    "HBM伺服器": [
+        # HBM 先進封裝/CoWoS 受益
+        ("3711", "日月光投控"), ("6239", "力成"),    ("3264", "欣銓"),
+        ("8150", "南茂"),
+        # AI 伺服器 ODM/整機
+        ("6669", "緯穎"),    ("3231", "緯創"),    ("2356", "英業達"),
+        ("4938", "和碩"),
+        # 散熱/電源管理
+        ("3017", "奇鋐"),    ("6415", "矽力-KY"),
+        # 伺服器管理 IC / BMC
+        ("5274", "信驊"),
+        # IC 通路（AI 伺服器零組件）
+        ("3036", "文曄"),
+        # 高速連接 / PCIe
+        ("4966", "譜瑞-KY"),
+        # GaN RF / 功率
+        ("3105", "穩懋"),
     ],
 }
 
@@ -198,7 +284,8 @@ async def _monthly_full_screen():
         )
         log_id = log[0]["id"] if log else None
         try:
-            candidates = await run_screening(pid, today)
+            pool_cfg   = _POOL_CFG_BY_NAME.get(pname, {})
+            candidates = await run_screening(pid, today, pool_cfg=pool_cfg)
             await save_results(candidates)
             if log_id:
                 await execute(
@@ -269,7 +356,7 @@ async def health():
     stocks = await fetch_all("SELECT COUNT(*) AS n FROM screener_pool_stocks WHERE is_active=TRUE")
     return {
         "status":  "ok",
-        "version": "1.0.0",
+        "version": "1.2.0",
         "time":    datetime.datetime.now(_tz).isoformat(),
         "pools":   pools[0]["n"] if pools else 0,
         "stocks":  stocks[0]["n"] if stocks else 0,
@@ -324,7 +411,7 @@ async def manual_screen(
     _tz = datetime.timezone(datetime.timedelta(hours=8))
     td  = datetime.date.fromisoformat(trade_date) if trade_date else datetime.datetime.now(_tz).date()
     asyncio.create_task(_monthly_full_screen())
-    return {"status": "篩選已觸發", "date": str(td)}
+    return {"status": "篩選已觸發", "date": str(td), "pools": len(_IC_POOLS)}
 
 
 @app.get("/results")

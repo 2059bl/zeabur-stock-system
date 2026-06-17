@@ -1,17 +1,17 @@
 """
-產業委屈股篩選引擎 v1.0
+產業委屈股篩選引擎 v1.1
 =========================
 雙層篩選架構：
   Layer 1：硬性門檻（6條，全過才進 Layer 2）
   Layer 2：加分條件（8條，每條 1-2 分，達 5 分以上入選）
 
-Layer 1 硬性門檻：
-  H1  累計營收年成長 > 30%
+Layer 1 硬性門檻（預設值，各池可透過 pool_cfg 覆寫）：
+  H1  累計營收年成長 > cum_growth_min%  (預設 30%)
   H2  Q1 EPS > 0
-  H3  本益比 < 20 倍
-  H4  股本 > 20 億
-  H5  近3交易日均量 > 1000 張
-  H6  負債比 < 50%
+  H3  本益比 < pe_max 倍               (預設 20)
+  H4  股本 > capital_min 億            (預設 20)
+  H5  近3交易日均量 > vol_min 張        (預設 1000)
+  H6  負債比 < debt_max%              (預設 50%)
 
 Layer 2 加分條件：
   S1  上半年獲利成長 > 30%         → +2分
@@ -28,20 +28,40 @@ import logging
 import datetime
 from typing import Optional
 
-from utils.db        import fetch_all, execute
-from utils.revenue   import fetch_monthly_revenue, calc_cumulative_growth
+from utils.db         import fetch_all, execute
+from utils.revenue    import fetch_monthly_revenue, calc_cumulative_growth
 from utils.financials import fetch_financials, fetch_stock_capital
-from utils.price     import fetch_price_metrics
+from utils.price      import fetch_price_metrics
 
 logger = logging.getLogger(__name__)
 
 SCORE_THRESHOLD = 5   # Layer 2 最低入選分數
 
+# 各產業池預設門檻覆寫（在 main.py _IC_POOLS cfg 設定）
+_DEFAULT_CFG = {
+    "cum_growth_min": 30,   # H1 累積營收年成長下限 (%)
+    "pe_max":         20,   # H3 本益比上限
+    "capital_min":    20,   # H4 股本下限 (億)
+    "vol_min":        1000, # H5 3日均量下限 (張)
+    "debt_max":       50,   # H6 負債比上限 (%)
+}
 
-async def screen_one(stock: dict, trade_date: datetime.date) -> Optional[dict]:
+
+async def screen_one(
+    stock: dict,
+    trade_date: datetime.date,
+    pool_cfg: dict | None = None,
+) -> Optional[dict]:
     """對單一股票執行雙層篩選，回傳結果 dict 或 None（未過 Layer 1）。"""
     code = stock["stock_code"]
     name = stock["stock_name"]
+
+    cfg = {**_DEFAULT_CFG, **(pool_cfg or {})}
+    cum_growth_min = cfg["cum_growth_min"]
+    pe_max         = cfg["pe_max"]
+    capital_min    = cfg["capital_min"]
+    vol_min        = cfg["vol_min"]
+    debt_max       = cfg["debt_max"]
 
     # 並行抓取所有資料
     price_data, rev_data, fin_data, capital = await asyncio.gather(
@@ -55,31 +75,30 @@ async def screen_one(stock: dict, trade_date: datetime.date) -> Optional[dict]:
 
     # ── Layer 1：硬性門檻 ────────────────────────────────────────────────────
     cum_growth = rev_data.get("cum_growth_pct")
-    if cum_growth is None or cum_growth < 30:
-        fails.append(f"H1累計營收成長{cum_growth}%<30%")
+    if cum_growth is None or cum_growth < cum_growth_min:
+        fails.append(f"H1累積營收{cum_growth}%<{cum_growth_min}%")
 
     q1_eps = fin_data.get("q1_eps")
     if q1_eps is None or q1_eps <= 0:
         fails.append(f"H2 Q1 EPS={q1_eps}≤0")
 
-    # 本益比：price / (EPS_年化)；用 Q1×4 近似年化
     pe = None
     if price_data and q1_eps and q1_eps > 0:
         annualized_eps = q1_eps * 4
         pe = round(price_data["close"] / annualized_eps, 1)
-    if pe is None or pe >= 20:
-        fails.append(f"H3 本益比{pe}≥20")
+    if pe is None or pe >= pe_max:
+        fails.append(f"H3 PE={pe}≥{pe_max}")
 
-    if capital < 20:
-        fails.append(f"H4 股本{capital}億<20億")
+    if capital < capital_min:
+        fails.append(f"H4 股本{capital}億<{capital_min}億")
 
     avg_vol = price_data["avg_vol_3d"] if price_data else 0
-    if avg_vol < 1000:
-        fails.append(f"H5 近3日均量{avg_vol:.0f}張<1000張")
+    if avg_vol < vol_min:
+        fails.append(f"H5 均量{avg_vol:.0f}張<{vol_min}張")
 
     debt = fin_data.get("debt_ratio")
-    if debt is None or debt >= 50:
-        fails.append(f"H6 負債比{debt}%≥50%")
+    if debt is None or debt >= debt_max:
+        fails.append(f"H6 負債比{debt}%≥{debt_max}%")
 
     if fails:
         logger.debug(f"{code} Layer1 未過：{'; '.join(fails)}")
@@ -102,8 +121,7 @@ async def screen_one(stock: dict, trade_date: datetime.date) -> Optional[dict]:
         score += 1
         reasons.append("近3月營收年增(+1)")
 
-    # S3 外資近1週轉買（若無資料跳過）
-    # 留空接口，等接 FinMind 法人資料後補充
+    # S3 外資近1週轉買（留空接口）
     # if foreign_net_1w > 0: score += 2; reasons.append(...)
 
     # S4 距52週高點跌幅 > 20%（dist_high_pct 為負數）
@@ -124,8 +142,7 @@ async def screen_one(stock: dict, trade_date: datetime.date) -> Optional[dict]:
         score += 1
         reasons.append(f"月漲{m1:.1f}%(+1)")
 
-    # S7 法人持股 < 30%（暫用距高點作為替代，待補 FinMind 持股資料）
-    # 留空接口
+    # S7 法人持股（留空接口）
 
     # S8 近1季漲幅 < 30%
     q1p = price_data.get("q1_pct") if price_data else None
@@ -160,10 +177,12 @@ async def screen_one(stock: dict, trade_date: datetime.date) -> Optional[dict]:
     }
 
 
-async def run_screening(pool_id: int, trade_date: datetime.date) -> list[dict]:
-    """
-    對指定產業池執行完整篩選，回傳入選股清單（按分數降序）。
-    """
+async def run_screening(
+    pool_id: int,
+    trade_date: datetime.date,
+    pool_cfg: dict | None = None,
+) -> list[dict]:
+    """對指定產業池執行完整篩選，回傳入選股清單（按分數降序）。"""
     stocks = await fetch_all("""
         SELECT ps.stock_code, ps.pool_id,
                COALESCE(s.stock_name, ps.stock_code) AS stock_name
@@ -176,13 +195,13 @@ async def run_screening(pool_id: int, trade_date: datetime.date) -> list[dict]:
         logger.warning(f"Pool {pool_id} 無啟用股票")
         return []
 
-    logger.info(f"[Pool {pool_id}] 開始篩選 {len(stocks)} 檔")
-    sem = asyncio.Semaphore(5)   # 控制 FinMind 並發
+    logger.info(f"[Pool {pool_id}] 開始篩選 {len(stocks)} 檔 cfg={pool_cfg}")
+    sem = asyncio.Semaphore(5)
 
     async def _one(s):
         async with sem:
             try:
-                return await screen_one(s, trade_date)
+                return await screen_one(s, trade_date, pool_cfg=pool_cfg)
             except Exception as e:
                 logger.warning(f"{s['stock_code']} 篩選失敗: {e}")
                 return None
