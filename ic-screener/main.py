@@ -502,7 +502,7 @@ async def lifespan(app: FastAPI):
     scheduler.shutdown(wait=False)
 
 
-app = FastAPI(title="產業委屈股篩選系統", version="1.0.0", lifespan=lifespan)
+app = FastAPI(title="產業委屈股篩選系統", version="1.4.1", lifespan=lifespan)
 
 
 # ── API Routes ────────────────────────────────────────────────────────────────
@@ -514,7 +514,7 @@ async def health():
     stocks = await fetch_all("SELECT COUNT(*) AS n FROM screener_pool_stocks WHERE is_active=TRUE")
     return {
         "status":  "ok",
-        "version": "1.4.0",
+        "version": "1.4.1",
         "time":    datetime.datetime.now(_tz).isoformat(),
         "pools":   pools[0]["n"] if pools else 0,
         "stocks":  stocks[0]["n"] if stocks else 0,
@@ -626,7 +626,7 @@ async def get_logs(limit: int = Query(10, le=50)):
 # ── Web 儀表板 ────────────────────────────────────────────────────────────────
 
 @app.get("/dashboard", response_class=HTMLResponse)
-async def dashboard():
+async def dashboard(pool: Optional[int] = Query(None, description="直接開啟指定 pool_id")):
     _tz    = datetime.timezone(datetime.timedelta(hours=8))
     now_str = datetime.datetime.now(_tz).strftime("%Y-%m-%d %H:%M")
 
@@ -669,7 +669,13 @@ async def dashboard():
         pname = pool["pool_name"]
         prows = [r for r in results if r["pool_id"] == pid]
 
-        pool_tabs += f'<button class="pool-tab" id="tab-{pid}" onclick="switchPool({pid})">{pname}（{len(prows)}）</button>'
+        pool_tabs += (
+            f'<span style="display:inline-flex;align-items:center;gap:2px">'
+            f'<button class="pool-tab" id="tab-{pid}" onclick="switchPool({pid})">{pname}（{len(prows)}）</button>'
+            f'<a href="/dashboard?pool={pid}" title="複製池連結" style="color:#334155;font-size:11px;padding:4px 5px;border-radius:4px;text-decoration:none;line-height:1" '
+            f'onmouseover="this.style.color=\'#38bdf8\'" onmouseout="this.style.color=\'#334155\'">🔗</a>'
+            f'</span>'
+        )
 
         rows_html = ""
         for r in prows:
@@ -716,7 +722,7 @@ async def dashboard():
           <td style="font-size:11px;color:#64748b">{(l.get('error_msg') or '')[:50]}</td>
         </tr>"""
 
-    first_pid = pools[0]["pool_id"] if pools else 1
+    first_pid = pool if pool else (pools[0]["pool_id"] if pools else 1)
 
     return f"""<!DOCTYPE html>
 <html lang="zh-Hant">
@@ -767,7 +773,7 @@ async def dashboard():
 <div class="main">
 
 <div class="stat-grid">
-  <div class="stat"><div class="lbl">追蹤產業池</div><div class="val" style="color:#38bdf8">{len(pools)}</div><div class="sub">IC三產業</div></div>
+  <div class="stat"><div class="lbl">追蹤產業池</div><div class="val" style="color:#38bdf8">{len(pools)}</div><div class="sub">14個細分池</div></div>
   <div class="stat"><div class="lbl">追蹤股票</div><div class="val">{total_stocks}</div><div class="sub">跨產業合計</div></div>
   <div class="stat"><div class="lbl">本月入選</div><div class="val" style="color:#22c55e">{len(results)}</div><div class="sub">委屈股候選</div></div>
   <div class="stat"><div class="lbl">最新篩選</div><div class="val" style="font-size:14px;padding-top:4px">{screen_date}</div><div class="sub">每月10日更新</div></div>
