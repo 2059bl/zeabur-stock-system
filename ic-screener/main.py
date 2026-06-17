@@ -424,7 +424,7 @@ async def dashboard():
         pname = pool["pool_name"]
         prows = [r for r in results if r["pool_id"] == pid]
 
-        pool_tabs += f'<button class="tab" id="tab-{pid}" onclick="switchPool({pid})">{pname}（{len(prows)}）</button>'
+        pool_tabs += f'<button class="pool-tab" id="tab-{pid}" onclick="switchPool({pid})">{pname}（{len(prows)}）</button>'
 
         rows_html = ""
         for r in prows:
