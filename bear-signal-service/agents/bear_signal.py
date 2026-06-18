@@ -16,6 +16,7 @@ import logging
 import datetime
 from utils.db          import fetch_all, fetch_one, execute
 from utils.market_data import fetch_futures_institutional, fetch_usdtwd, fetch_margin_aggregate
+from utils.news_scanner import scan_news
 
 logger = logging.getLogger(__name__)
 
@@ -171,13 +172,14 @@ async def compute_bear_signal() -> dict:
     today = str(datetime.date.today())
 
     # 並行抓取所有資料
-    (inst_db, futures, usdtwd, margin, index_t, rotation) = await asyncio.gather(
+    (inst_db, futures, usdtwd, margin, index_t, rotation, news) = await asyncio.gather(
         _d1_d2_foreign_trust(),
         fetch_futures_institutional(),
         fetch_usdtwd(),
         fetch_margin_aggregate(SAMPLE_STOCKS),
         _d7_index_trend(),
         _d8_industry_rotation(),
+        scan_news(),
     )
 
     # D3：台指期淨空單評分
@@ -223,6 +225,7 @@ async def compute_bear_signal() -> dict:
         "D6_融券增加":   round(d6, 1),
         "D7_大盤走勢":   index_t["d7_score"],
         "D8_產業輪動":   rotation["d8_score"],
+        "D9_新聞情緒":   news["d9_score"],
     }
     total = round(sum(scores.values()) / len(scores), 1)
     level, action = _level(total)
@@ -247,6 +250,15 @@ async def compute_bear_signal() -> dict:
         "weakening_pools":    rotation["weakening_pools"],
         "rotation_latest_dt": rotation.get("latest_date"),
         "rotation_prev_dt":   rotation.get("prev_date"),
+        # D9 新聞情緒
+        "news_d9_score":      news["d9_score"],
+        "news_article_count": news.get("article_count", 0),
+        "news_black_swan":    news.get("black_swan_hits", []),
+        "news_gray_rhino":    news.get("gray_rhino_hits", []),
+        "news_sentiment":     news.get("sentiment_score", 0),
+        "news_risk_level":    news.get("llm_risk_level", "LOW"),
+        "news_key_risks":     news.get("key_risks", []),
+        "news_summary":       news.get("summary", ""),
     }
 
     logger.info(f"Bear Signal {today}: score={total} level={level} "
@@ -258,35 +270,45 @@ async def save_signal(result: dict):
     """將信號結果寫入 bear_market_indicators 表。"""
     sig_date = (datetime.date.fromisoformat(result["date"])
                 if isinstance(result["date"], str) else result["date"])
+    black_swan_text = "; ".join(result.get("news_black_swan", []))[:500] or None
     await execute("""
         INSERT INTO bear_market_indicators
             (signal_date, total_score, signal_level,
              d1_foreign, d2_trust, d3_futures, d4_currency,
-             d5_margin, d6_short, d7_index, d8_rotation,
+             d5_margin, d6_short, d7_index, d8_rotation, d9_news,
              foreign_sell_days, futures_net_short,
              usdtwd_rate, usdtwd_deprec_pct,
              margin_chg_pct, short_ratio, index_m1_pct,
-             weakening_pools, action_text)
-        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20)
+             weakening_pools, news_summary, news_risk_level, news_black_swan,
+             action_text)
+        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24)
         ON CONFLICT (signal_date) DO UPDATE SET
-            total_score      = EXCLUDED.total_score,
-            signal_level     = EXCLUDED.signal_level,
-            d3_futures       = EXCLUDED.d3_futures,
-            d4_currency      = EXCLUDED.d4_currency,
+            total_score       = EXCLUDED.total_score,
+            signal_level      = EXCLUDED.signal_level,
+            d3_futures        = EXCLUDED.d3_futures,
+            d4_currency       = EXCLUDED.d4_currency,
+            d9_news           = EXCLUDED.d9_news,
             futures_net_short = EXCLUDED.futures_net_short,
-            usdtwd_rate      = EXCLUDED.usdtwd_rate,
-            weakening_pools  = EXCLUDED.weakening_pools,
-            updated_at       = NOW()
+            usdtwd_rate       = EXCLUDED.usdtwd_rate,
+            weakening_pools   = EXCLUDED.weakening_pools,
+            news_summary      = EXCLUDED.news_summary,
+            news_risk_level   = EXCLUDED.news_risk_level,
+            news_black_swan   = EXCLUDED.news_black_swan,
+            updated_at        = NOW()
     """,
         sig_date, result["score"], result["level"],
         result["scores"]["D1_外資現貨"], result["scores"]["D2_投信現貨"],
         result["scores"]["D3_台指期空單"], result["scores"]["D4_台幣貶值"],
         result["scores"]["D5_融資減少"], result["scores"]["D6_融券增加"],
         result["scores"]["D7_大盤走勢"], result["scores"]["D8_產業輪動"],
+        result["scores"]["D9_新聞情緒"],
         result["foreign_sell_days"], result["futures_net_short"],
         result["usdtwd_rate"], result["usdtwd_deprec_pct"],
         result["margin_chg_pct"], result["short_ratio"],
         result["index_m1_pct"],
         ",".join(result["weakening_pools"]) if result["weakening_pools"] else None,
+        result.get("news_summary"),
+        result.get("news_risk_level"),
+        black_swan_text,
         result["action"],
     )

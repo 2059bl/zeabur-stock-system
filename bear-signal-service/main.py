@@ -1,9 +1,10 @@
 """
-Bear Signal Service v1.0
+Bear Signal Service v1.1
 ========================
-外資離場 8 維空頭信號 + 產業輪動警示
+外資離場 9 維空頭信號 + 產業輪動警示 + 新聞情緒掃描 + 停損預警
 
 排程：
+  每日 14:30 Asia/Taipei — 停損預警（盤中最後半小時）
   每日 22:30 Asia/Taipei — 主信號計算（stock-ai-agent 22:00 跑完後）
 
 共用 DB：與 stock-ai-agent / ic-screener 同一個 PostgreSQL
@@ -22,6 +23,7 @@ from apscheduler.triggers.cron import CronTrigger
 from utils.db       import get_pool, fetch_all, execute
 from utils.notifier import send
 from agents.bear_signal import compute_bear_signal, save_signal
+from agents.stop_loss   import check_stop_loss, notify_stop_loss
 
 logging.basicConfig(
     level=logging.INFO,
@@ -31,14 +33,14 @@ logger    = logging.getLogger(__name__)
 scheduler = AsyncIOScheduler(timezone="Asia/Taipei")
 _TZ8      = datetime.timezone(datetime.timedelta(hours=8))
 
-VERSION = "1.0.0"
+VERSION = "1.1.0"
 
 _SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS bear_market_indicators (
     id               BIGSERIAL PRIMARY KEY,
     signal_date      DATE NOT NULL UNIQUE,
     total_score      NUMERIC(5,1),
-    signal_level     VARCHAR(10),          -- NORMAL/WARNING/DANGER/EXTREME
+    signal_level     VARCHAR(10),
     d1_foreign       NUMERIC(5,1),
     d2_trust         NUMERIC(5,1),
     d3_futures       NUMERIC(5,1),
@@ -47,6 +49,7 @@ CREATE TABLE IF NOT EXISTS bear_market_indicators (
     d6_short         NUMERIC(5,1),
     d7_index         NUMERIC(5,1),
     d8_rotation      NUMERIC(5,1),
+    d9_news          NUMERIC(5,1),
     foreign_sell_days   INT,
     futures_net_short   BIGINT,
     usdtwd_rate         NUMERIC(7,4),
@@ -55,14 +58,21 @@ CREATE TABLE IF NOT EXISTS bear_market_indicators (
     short_ratio         NUMERIC(6,2),
     index_m1_pct        NUMERIC(6,2),
     weakening_pools     TEXT,
+    news_summary        TEXT,
+    news_risk_level     VARCHAR(10),
+    news_black_swan     TEXT,
     action_text         TEXT,
     updated_at          TIMESTAMPTZ DEFAULT NOW()
 );
+ALTER TABLE bear_market_indicators ADD COLUMN IF NOT EXISTS d9_news NUMERIC(5,1);
+ALTER TABLE bear_market_indicators ADD COLUMN IF NOT EXISTS news_summary TEXT;
+ALTER TABLE bear_market_indicators ADD COLUMN IF NOT EXISTS news_risk_level VARCHAR(10);
+ALTER TABLE bear_market_indicators ADD COLUMN IF NOT EXISTS news_black_swan TEXT;
 """
 
 
 async def _run_daily_signal():
-    """每日 22:30 執行：計算 8 維信號 + 推播。"""
+    """每日 22:30 執行：計算 9 維信號（含新聞）+ 推播。"""
     now = datetime.datetime.now(_TZ8)
     logger.info(f"[Bear Signal] 開始計算 {now.date()}")
     try:
@@ -72,6 +82,22 @@ async def _run_daily_signal():
         logger.info(f"[Bear Signal] 完成 score={result['score']} level={result['level']}")
     except Exception as e:
         logger.exception(f"[Bear Signal] 執行失敗: {e}")
+
+
+async def _run_stop_loss_check():
+    """每日 14:30 執行：停損預警掃描。"""
+    now = datetime.datetime.now(_TZ8)
+    # 週末跳過
+    if now.weekday() >= 5:
+        return
+    logger.info(f"[StopLoss] 開始掃描 {now.date()}")
+    try:
+        result = await check_stop_loss()
+        if result["triggered"]:
+            await notify_stop_loss(result)
+        logger.info(f"[StopLoss] 完成，觸發 {len(result['triggered'])} 個預警")
+    except Exception as e:
+        logger.exception(f"[StopLoss] 執行失敗: {e}")
 
 
 async def _send_report(r: dict):
@@ -84,11 +110,11 @@ async def _send_report(r: dict):
         f"綜合評分：*{r['score']}/100*  等級：*{r['level']}*",
         f"建議：{r['action']}",
         "",
-        "*8 維信號分解：*",
+        "*9 維信號分解：*",
     ]
     for dim, score in r["scores"].items():
         bar = "█" * int(score // 10) + "░" * (10 - int(score // 10))
-        lines.append(f"`{dim:<12}` {bar} {score:.0f}")
+        lines.append(f"`{dim:<14}` {bar} {score:.0f}")
 
     lines += [
         "",
@@ -99,10 +125,20 @@ async def _send_report(r: dict):
         f"• 外資現貨連賣：{r['foreign_sell_days']} 日",
     ]
 
-    if r["weakening_pools"]:
+    if r.get("weakening_pools"):
         lines += ["", "⚠️ *產業輪動警示（轉弱池）：*"]
         for pool in r["weakening_pools"]:
             lines.append(f"  • {pool}")
+
+    # 新聞情緒摘要
+    news_risk = r.get("news_risk_level", "LOW")
+    news_summary = r.get("news_summary", "")
+    if news_risk in ("HIGH", "EXTREME") or r.get("news_black_swan"):
+        lines += ["", f"📰 *國際新聞風險：{news_risk}*"]
+        if news_summary:
+            lines.append(f"  {news_summary}")
+        for hit in r.get("news_black_swan", [])[:3]:
+            lines.append(f"  🚨 {hit}")
 
     await send("\n".join(lines))
 
@@ -119,8 +155,13 @@ async def lifespan(app: FastAPI):
         CronTrigger(hour=22, minute=30, timezone="Asia/Taipei"),
         id="daily_bear_signal", replace_existing=True,
     )
+    scheduler.add_job(
+        _run_stop_loss_check,
+        CronTrigger(hour=14, minute=30, timezone="Asia/Taipei"),
+        id="daily_stop_loss", replace_existing=True,
+    )
     scheduler.start()
-    logger.info("排程啟動：每日 22:30 計算外資離場信號")
+    logger.info("排程啟動：22:30 主信號 / 14:30 停損預警")
     yield
     scheduler.shutdown(wait=False)
 
@@ -142,6 +183,28 @@ async def manual_signal():
     """手動觸發信號計算（背景執行）。"""
     asyncio.create_task(_run_daily_signal())
     return {"status": "triggered", "date": str(datetime.date.today())}
+
+
+@app.post("/run/stop-loss")
+async def manual_stop_loss():
+    """手動觸發停損預警掃描。"""
+    asyncio.create_task(_run_stop_loss_check())
+    return {"status": "triggered", "date": str(datetime.date.today())}
+
+
+@app.get("/alerts/stop-loss")
+async def stop_loss_check():
+    """即時查詢停損預警（不推播）。"""
+    result = await check_stop_loss()
+    return result
+
+
+@app.get("/news/latest")
+async def latest_news():
+    """即時掃描最新新聞情緒（不寫 DB）。"""
+    from utils.news_scanner import scan_news
+    result = await scan_news()
+    return result
 
 
 @app.get("/signal/latest")
@@ -187,6 +250,7 @@ async def dashboard():
         ("D6 融券增加", "d6_short"),
         ("D7 大盤走勢", "d7_index"),
         ("D8 產業輪動", "d8_rotation"),
+        ("D9 新聞情緒", "d9_news"),
     ]
     dims_html = ""
     for label, key in dims:
@@ -210,6 +274,8 @@ async def dashboard():
               "WARNING": "#eab308", "NORMAL": "#22c55e"}.get(r.get("signal_level"), "#64748b")
         wp = r.get("weakening_pools") or "—"
         idx_pct_str = (f"{r.get('index_m1_pct'):+.1f}%" if r.get('index_m1_pct') else '—')
+        nr = r.get("news_risk_level") or "LOW"
+        nrc = {"EXTREME":"#ef4444","HIGH":"#f97316","MEDIUM":"#eab308","LOW":"#22c55e"}.get(nr,"#64748b")
         history_html += f"""<tr>
           <td style="color:#94a3b8">{r['signal_date']}</td>
           <td style="color:{lc};font-weight:700">{r.get('total_score',0)}</td>
@@ -218,12 +284,23 @@ async def dashboard():
           <td style="color:#94a3b8">{r.get('usdtwd_rate') or '—'}</td>
           <td style="color:#94a3b8">{idx_pct_str}</td>
           <td style="font-size:11px;color:#64748b">{(wp[:40] + '…') if len(wp) > 40 else wp}</td>
+          <td style="color:{nrc};font-size:11px;font-weight:600">{nr}</td>
         </tr>"""
 
     wp_list = latest.get("weakening_pools") or ""
     wp_html = "".join(f'<div style="color:#f97316;font-size:13px">⚠ {p}</div>'
                       for p in wp_list.split(",") if p.strip()) if wp_list else \
               '<div style="color:#22c55e;font-size:13px">✅ 無轉弱產業池</div>'
+
+    news_risk = latest.get("news_risk_level") or "LOW"
+    news_color = {"EXTREME": "#ef4444", "HIGH": "#f97316",
+                  "MEDIUM": "#eab308", "LOW": "#22c55e"}.get(news_risk, "#64748b")
+    news_summary = latest.get("news_summary") or "—"
+    black_swan_raw = latest.get("news_black_swan") or ""
+    black_swan_html = "".join(
+        f'<div style="color:#ef4444;font-size:12px;margin-top:4px">🚨 {h}</div>'
+        for h in black_swan_raw.split(";") if h.strip()
+    ) if black_swan_raw else ""
 
     return f"""<!DOCTYPE html>
 <html lang="zh-Hant">
@@ -293,6 +370,17 @@ tr:hover td{{background:#111827}}
     </table>
     <div class="card-title" style="margin-top:16px">產業輪動警示</div>
     {wp_html}
+    <div class="card-title" style="margin-top:16px">
+      📰 國際新聞風險
+      <span style="color:{news_color};font-size:11px;margin-left:8px;font-weight:700">{news_risk}</span>
+    </div>
+    <div style="font-size:12px;color:#94a3b8;margin-bottom:4px">{news_summary}</div>
+    {black_swan_html}
+    <div style="margin-top:12px">
+      <a href="/alerts/stop-loss" style="color:#38bdf8;font-size:12px;text-decoration:none">
+        🛑 查看停損預警 →
+      </a>
+    </div>
   </div>
 </div>
 
@@ -302,9 +390,9 @@ tr:hover td{{background:#111827}}
   <table>
     <thead><tr>
       <th>日期</th><th>評分</th><th>等級</th>
-      <th>期貨淨空</th><th>USD/TWD</th><th>大盤月漲</th><th>轉弱產業</th>
+      <th>期貨淨空</th><th>USD/TWD</th><th>大盤月漲</th><th>轉弱產業</th><th>新聞風險</th>
     </tr></thead>
-    <tbody>{history_html or '<tr><td colspan="7" style="text-align:center;padding:20px;color:#475569">尚未執行</td></tr>'}</tbody>
+    <tbody>{history_html or '<tr><td colspan="8" style="text-align:center;padding:20px;color:#475569">尚未執行</td></tr>'}</tbody>
   </table>
   </div>
 </div>
