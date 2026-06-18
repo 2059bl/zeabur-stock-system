@@ -256,6 +256,8 @@ async def compute_bear_signal() -> dict:
 
 async def save_signal(result: dict):
     """將信號結果寫入 bear_market_indicators 表。"""
+    sig_date = (datetime.date.fromisoformat(result["date"])
+                if isinstance(result["date"], str) else result["date"])
     await execute("""
         INSERT INTO bear_market_indicators
             (signal_date, total_score, signal_level,
@@ -276,7 +278,7 @@ async def save_signal(result: dict):
             weakening_pools  = EXCLUDED.weakening_pools,
             updated_at       = NOW()
     """,
-        result["date"], result["score"], result["level"],
+        sig_date, result["score"], result["level"],
         result["scores"]["D1_外資現貨"], result["scores"]["D2_投信現貨"],
         result["scores"]["D3_台指期空單"], result["scores"]["D4_台幣貶值"],
         result["scores"]["D5_融資減少"], result["scores"]["D6_融券增加"],
