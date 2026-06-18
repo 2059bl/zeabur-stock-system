@@ -7,8 +7,9 @@
 """
 import logging
 import datetime
-from utils.db       import fetch_all
-from utils.notifier import send
+import asyncio
+from utils.db          import fetch_all
+from utils.notifier    import send
 from utils.market_data import _get as finmind_get
 
 logger = logging.getLogger(__name__)
@@ -33,9 +34,8 @@ async def _get_screened_positions() -> list[dict]:
                r.close_price  AS entry_price,
                p.pool_name
         FROM screener_results r
-        JOIN screener_stocks ss ON ss.stock_code = r.stock_code
-        JOIN screener_stocks s  ON s.stock_code  = r.stock_code
-        JOIN screener_pools  p  ON p.pool_id     = r.pool_id
+        JOIN screener_stocks s ON s.stock_code = r.stock_code
+        JOIN screener_pools  p ON p.pool_id    = r.pool_id
         WHERE r.screen_date >= $1
           AND r.close_price IS NOT NULL
           AND r.close_price > 0
@@ -44,60 +44,29 @@ async def _get_screened_positions() -> list[dict]:
     return rows
 
 
-async def _get_latest_prices(stock_codes: list[str]) -> dict[str, float]:
+async def _get_latest_and_recent_prices(stock_codes: list[str]) -> dict[str, dict]:
     """
-    從 stock-ai-agent stock_prices 取最新收盤價。
-    若 DB 中無資料（非追蹤股），改從 FinMind 抓。
+    用 FinMind TaiwanStockPrice 取最新及近 5 日收盤價。
+    限制並發 10 檔避免 rate limit。
     """
     if not stock_codes:
         return {}
 
-    # 先查 DB
-    placeholders = ",".join(f"${i+1}" for i in range(len(stock_codes)))
-    db_rows = await fetch_all(f"""
-        SELECT DISTINCT ON (stock_code)
-               stock_code, close_price
-        FROM stock_prices
-        WHERE stock_code = ANY(ARRAY[{placeholders}])
-        ORDER BY stock_code, trade_date DESC
-    """, *stock_codes)
+    result: dict[str, dict] = {}
+    batch = stock_codes[:15]
+    tasks = [finmind_get("TaiwanStockPrice", code, days=10) for code in batch]
+    responses = await asyncio.gather(*tasks, return_exceptions=True)
 
-    prices = {r["stock_code"]: float(r["close_price"]) for r in db_rows}
-
-    # 不在 DB 的股票改用 FinMind
-    missing = [c for c in stock_codes if c not in prices]
-    if missing:
-        import asyncio
-        tasks = [finmind_get("TaiwanStockPrice", code, days=5) for code in missing[:10]]
-        results = await asyncio.gather(*tasks, return_exceptions=True)
-        for code, rows in zip(missing[:10], results):
-            if isinstance(rows, list) and rows:
-                latest = sorted(rows, key=lambda x: x["date"])[-1]
-                prices[code] = float(latest.get("close", 0) or 0)
-
-    return prices
-
-
-async def _get_recent_prices_3d(stock_codes: list[str]) -> dict[str, list[float]]:
-    """取近 3 日收盤價，用於快速下跌偵測。"""
-    if not stock_codes:
-        return {}
-    cutoff = datetime.date.today() - datetime.timedelta(days=10)
-    placeholders = ",".join(f"${i+2}" for i in range(len(stock_codes)))
-    rows = await fetch_all(f"""
-        SELECT stock_code, trade_date, close_price
-        FROM stock_prices
-        WHERE trade_date >= $1
-          AND stock_code = ANY(ARRAY[{placeholders}])
-        ORDER BY stock_code, trade_date DESC
-    """, cutoff, *stock_codes)
-
-    result: dict[str, list[float]] = {}
-    for r in rows:
-        c = r["stock_code"]
-        result.setdefault(c, [])
-        if len(result[c]) < QUICK_DROP_DAYS + 1:
-            result[c].append(float(r["close_price"]))
+    for code, rows in zip(batch, responses):
+        if isinstance(rows, Exception) or not rows:
+            continue
+        sorted_rows = sorted(rows, key=lambda x: x["date"])
+        closes = [float(r.get("close", 0) or 0) for r in sorted_rows if r.get("close")]
+        if closes:
+            result[code] = {
+                "latest":   closes[-1],
+                "recent5":  closes[-5:],
+            }
     return result
 
 
@@ -112,33 +81,31 @@ async def check_stop_loss() -> dict:
         return {"triggered": [], "checked": 0}
 
     codes = [p["stock_code"] for p in positions]
-    latest_prices = await _get_latest_prices(codes)
-    recent_prices = await _get_recent_prices_3d(codes)
+    price_data = await _get_latest_and_recent_prices(codes)
 
     triggered = []
     for pos in positions:
         code        = pos["stock_code"]
         name        = pos.get("stock_name", code)
         entry_price = float(pos["entry_price"] or 0)
-        current     = latest_prices.get(code)
+        pdata       = price_data.get(code)
         pool        = pos.get("pool_name", "?")
         screen_date = pos.get("screen_date")
 
-        if not current or entry_price <= 0:
+        if not pdata or entry_price <= 0:
             continue
 
+        current  = pdata["latest"]
+        recent5  = pdata["recent5"]
         drop_pct = (current - entry_price) / entry_price * 100
 
         alert_type = None
         if drop_pct <= STOP_LOSS_PCT:
             alert_type = "STOP_LOSS"
-        else:
-            # 快速下跌偵測
-            prices_3d = recent_prices.get(code, [])
-            if len(prices_3d) >= 2:
-                quick_drop = (prices_3d[0] - prices_3d[-1]) / prices_3d[-1] * 100
-                if quick_drop <= QUICK_DROP_PCT:
-                    alert_type = "QUICK_DROP"
+        elif len(recent5) >= 2:
+            quick_drop = (recent5[-1] - recent5[0]) / recent5[0] * 100
+            if quick_drop <= QUICK_DROP_PCT:
+                alert_type = "QUICK_DROP"
 
         if alert_type:
             triggered.append({

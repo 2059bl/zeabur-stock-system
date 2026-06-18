@@ -15,7 +15,7 @@ import asyncio
 import logging
 import datetime
 from utils.db          import fetch_all, fetch_one, execute
-from utils.market_data import fetch_futures_institutional, fetch_usdtwd, fetch_margin_aggregate
+from utils.market_data import fetch_futures_institutional, fetch_usdtwd, fetch_margin_aggregate, _get
 from utils.news_scanner import scan_news
 
 logger = logging.getLogger(__name__)
@@ -44,31 +44,32 @@ def _level(score: float) -> tuple[str, str]:
 
 
 async def _d1_d2_foreign_trust() -> dict:
-    """D1/D2：讀 stock-ai-agent DB 外資/投信近期買賣超。"""
+    """
+    D1/D2：FinMind TaiwanStockInstitutionalInvestorsBuySell
+    抓大盤整體外資/投信買賣超（用 2330 台積電代理，流動性最高）。
+    """
     try:
-        rows = await fetch_all("""
-            SELECT trade_date,
-                   SUM(foreign_net_buy) AS total_foreign,
-                   SUM(investment_trust_net_buy) AS total_trust
-            FROM stock_indicators
-            WHERE trade_date >= CURRENT_DATE - INTERVAL '10 days'
-              AND foreign_net_buy IS NOT NULL
-            GROUP BY trade_date
-            ORDER BY trade_date DESC
-            LIMIT 10
-        """)
+        rows = await _get("TaiwanStockInstitutionalInvestorsBuySell", "2330", days=14)
+        foreign_rows = sorted(
+            [r for r in rows if r.get("institutional_investors") == "Foreign_Investor"],
+            key=lambda x: x["date"], reverse=True
+        )
+        trust_rows = sorted(
+            [r for r in rows if r.get("institutional_investors") == "Investment_Trust"],
+            key=lambda x: x["date"], reverse=True
+        )
     except Exception:
-        rows = []
+        foreign_rows, trust_rows = [], []
 
-    if not rows:
+    if not foreign_rows:
         return {"foreign_sell_days": 0, "trust_sell_days": 0,
                 "foreign_cum_5d": 0, "d1_score": 0, "d2_score": 0}
 
-    f_sell_days = sum(1 for r in rows if (r.get("total_foreign") or 0) < 0)
-    t_sell_days = sum(1 for r in rows if (r.get("total_trust") or 0) < 0)
-    f_cum_5d    = sum((r.get("total_foreign") or 0) for r in rows[:5])
+    f_sell_days = sum(1 for r in foreign_rows[:10] if (r.get("buy") or 0) < (r.get("sell") or 0))
+    t_sell_days = sum(1 for r in trust_rows[:10]   if (r.get("buy") or 0) < (r.get("sell") or 0))
+    f_cum_5d    = sum(((r.get("buy") or 0) - (r.get("sell") or 0)) for r in foreign_rows[:5])
 
-    d1 = min(100, f_sell_days * 10 + abs(f_cum_5d) / 1000)
+    d1 = min(100, f_sell_days * 10 + abs(f_cum_5d) / 100000)
     d2 = min(100, t_sell_days * 8)
     return {
         "foreign_sell_days": f_sell_days,
@@ -80,26 +81,20 @@ async def _d1_d2_foreign_trust() -> dict:
 
 
 async def _d7_index_trend() -> dict:
-    """D7：讀 0050 近月股價走勢作為大盤代理指標。"""
+    """D7：FinMind TaiwanStockPrice 0050 近月走勢作為大盤代理指標。"""
     try:
-        rows = await fetch_all("""
-            SELECT trade_date, close_price
-            FROM stock_prices
-            WHERE stock_code = '0050'
-            ORDER BY trade_date DESC
-            LIMIT 22
-        """)
+        rows = await _get("TaiwanStockPrice", "0050", days=35)
+        sorted_rows = sorted(rows, key=lambda x: x["date"])
     except Exception:
-        rows = []
+        sorted_rows = []
 
-    if len(rows) < 5:
+    if len(sorted_rows) < 5:
         return {"index_m1_pct": None, "d7_score": 0}
 
-    latest = float(rows[0]["close_price"])
-    month_ago = float(rows[-1]["close_price"])
+    latest   = float(sorted_rows[-1].get("close", 0) or 0)
+    month_ago = float(sorted_rows[0].get("close", 0) or 0)
     m1_pct = round((latest - month_ago) / month_ago * 100, 2) if month_ago else 0
 
-    # 大盤下跌 → 加空頭分數
     if m1_pct <= -10:   d7 = 80
     elif m1_pct <= -5:  d7 = 50
     elif m1_pct <= -2:  d7 = 25
