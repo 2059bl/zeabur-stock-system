@@ -33,7 +33,7 @@ logger    = logging.getLogger(__name__)
 scheduler = AsyncIOScheduler(timezone="Asia/Taipei")
 _TZ8      = datetime.timezone(datetime.timedelta(hours=8))
 
-VERSION = "1.1.0"
+VERSION = "1.2.0"
 
 _SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS bear_market_indicators (
@@ -200,11 +200,16 @@ async def stop_loss_check():
 
 
 @app.get("/news/latest")
-async def latest_news():
-    """即時掃描最新新聞情緒（不寫 DB）。"""
-    from utils.news_scanner import scan_news
-    result = await scan_news()
-    return result
+async def latest_news(force: bool = False):
+    """
+    查詢新聞情緒（快取 1 小時）。
+    ?force=true 可強制重新抓取並呼叫 LLM。
+    """
+    from utils.news_scanner import scan_news, _news_cache
+    import time
+    result = await scan_news(force=force)
+    cache_age = int(time.monotonic() - _news_cache["ts"]) if _news_cache["ts"] else 0
+    return {**result, "cache_age_seconds": cache_age}
 
 
 @app.get("/signal/latest")

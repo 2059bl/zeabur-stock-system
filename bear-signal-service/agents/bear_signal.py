@@ -43,34 +43,67 @@ def _level(score: float) -> tuple[str, str]:
     return "NORMAL", "🟢 正常：維持策略"
 
 
+_D1D2_BASKET = ["2330", "2454", "2317", "2382", "6669"]  # 五大權值股 basket
+
+
 async def _d1_d2_foreign_trust() -> dict:
     """
-    D1/D2：FinMind TaiwanStockInstitutionalInvestorsBuySell
-    抓大盤整體外資/投信買賣超（用 2330 台積電代理，流動性最高）。
+    D1/D2：聚合五大權值股（basket）外資/投信每日淨買賣，
+    推估市場整體外資方向。欄位：name（Foreign_Investor / Investment_Trust）。
     """
     try:
-        rows = await _get("TaiwanStockInstitutionalInvestorsBuySell", "2330", days=14)
-        foreign_rows = sorted(
-            [r for r in rows if r.get("institutional_investors") == "Foreign_Investor"],
-            key=lambda x: x["date"], reverse=True
-        )
-        trust_rows = sorted(
-            [r for r in rows if r.get("institutional_investors") == "Investment_Trust"],
-            key=lambda x: x["date"], reverse=True
-        )
+        tasks = [_get("TaiwanStockInstitutionalInvestorsBuySell", c, days=14)
+                 for c in _D1D2_BASKET]
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        all_rows = []
+        for r in results:
+            if isinstance(r, list):
+                all_rows.extend(r)
     except Exception:
-        foreign_rows, trust_rows = [], []
+        all_rows = []
 
-    if not foreign_rows:
+    # 按日期 + 名稱彙總 basket 總買賣
+    from collections import defaultdict
+    day_foreign: dict[str, dict] = defaultdict(lambda: {"buy": 0, "sell": 0})
+    day_trust:   dict[str, dict] = defaultdict(lambda: {"buy": 0, "sell": 0})
+
+    for row in all_rows:
+        dt   = row.get("date", "")
+        name = row.get("name", "")
+        buy  = row.get("buy") or 0
+        sell = row.get("sell") or 0
+        if name == "Foreign_Investor":
+            day_foreign[dt]["buy"]  += buy
+            day_foreign[dt]["sell"] += sell
+        elif name == "Investment_Trust":
+            day_trust[dt]["buy"]  += buy
+            day_trust[dt]["sell"] += sell
+
+    if not day_foreign:
         return {"foreign_sell_days": 0, "trust_sell_days": 0,
                 "foreign_cum_5d": 0, "d1_score": 0, "d2_score": 0}
 
-    f_sell_days = sum(1 for r in foreign_rows[:10] if (r.get("buy") or 0) < (r.get("sell") or 0))
-    t_sell_days = sum(1 for r in trust_rows[:10]   if (r.get("buy") or 0) < (r.get("sell") or 0))
-    f_cum_5d    = sum(((r.get("buy") or 0) - (r.get("sell") or 0)) for r in foreign_rows[:5])
+    sorted_dates = sorted(day_foreign.keys(), reverse=True)
 
-    d1 = min(100, f_sell_days * 10 + abs(f_cum_5d) / 100000)
+    f_sell_days = sum(
+        1 for dt in sorted_dates[:10]
+        if day_foreign[dt]["buy"] < day_foreign[dt]["sell"]
+    )
+    t_sell_days = sum(
+        1 for dt in sorted(day_trust.keys(), reverse=True)[:10]
+        if day_trust[dt]["buy"] < day_trust[dt]["sell"]
+    )
+    f_cum_5d = sum(
+        day_foreign[dt]["buy"] - day_foreign[dt]["sell"]
+        for dt in sorted_dates[:5]
+    )
+
+    # 每億元淨賣出加 1 分，連賣天數每天加 10 分
+    d1 = min(100, f_sell_days * 10 + abs(f_cum_5d) / 1e8 * 10)
     d2 = min(100, t_sell_days * 8)
+
+    logger.info(f"[D1/D2] basket={_D1D2_BASKET} f_sell_days={f_sell_days} "
+                f"f_cum_5d={f_cum_5d:+,.0f} d1={d1} d2={d2}")
     return {
         "foreign_sell_days": f_sell_days,
         "trust_sell_days":   t_sell_days,

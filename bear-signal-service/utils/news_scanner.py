@@ -14,7 +14,10 @@ import xml.etree.ElementTree as ET
 logger = logging.getLogger(__name__)
 
 OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY", "")
-OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
+OPENROUTER_URL     = "https://openrouter.ai/api/v1/chat/completions"
+NEWS_CACHE_TTL     = 3600  # 1 小時
+
+_news_cache: dict = {"result": None, "ts": 0.0}
 
 # 免費 RSS 來源（國際財金重點）
 RSS_SOURCES = [
@@ -156,11 +159,19 @@ async def _llm_sentiment(articles: list[dict]) -> dict:
         return {"sentiment_score": 0, "summary": f"LLM分析失敗: {e}"}
 
 
-async def scan_news() -> dict:
+async def scan_news(force: bool = False) -> dict:
     """
     主入口：抓取所有 RSS + LLM 分析。
     回傳供 D9 使用的評分字典。
+    結果快取 1 小時（force=True 可強制刷新）。
     """
+    import time
+    now = time.monotonic()
+    if not force and _news_cache["result"] and (now - _news_cache["ts"]) < NEWS_CACHE_TTL:
+        age = int(now - _news_cache["ts"])
+        logger.info(f"[News] 使用快取（{age}s 前）")
+        return _news_cache["result"]
+
     async with httpx.AsyncClient(
         headers={"User-Agent": "Mozilla/5.0 (compatible; BearSignalBot/1.0)"},
         timeout=15,
@@ -200,7 +211,7 @@ async def scan_news() -> dict:
     logger.info(f"[News] D9={d9} black={len(quick['black_swan_hits'])} "
                 f"gray={len(quick['gray_rhino_hits'])} llm={llm.get('sentiment_score',0)}")
 
-    return {
+    result = {
         "d9_score":         d9,
         "article_count":    len(articles),
         "black_swan_hits":  quick["black_swan_hits"],
@@ -210,3 +221,7 @@ async def scan_news() -> dict:
         "key_risks":        llm.get("key_risks", []),
         "summary":          llm.get("summary", ""),
     }
+    import time
+    _news_cache["result"] = result
+    _news_cache["ts"]     = time.monotonic()
+    return result
