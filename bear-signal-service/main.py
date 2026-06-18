@@ -209,13 +209,14 @@ async def dashboard():
         lc = {"EXTREME": "#ef4444", "DANGER": "#f97316",
               "WARNING": "#eab308", "NORMAL": "#22c55e"}.get(r.get("signal_level"), "#64748b")
         wp = r.get("weakening_pools") or "—"
+        idx_pct_str = (f"{r.get('index_m1_pct'):+.1f}%" if r.get('index_m1_pct') else '—')
         history_html += f"""<tr>
           <td style="color:#94a3b8">{r['signal_date']}</td>
           <td style="color:{lc};font-weight:700">{r.get('total_score',0)}</td>
           <td><span style="color:{lc}">{r.get('signal_level','—')}</span></td>
           <td style="color:#94a3b8">{r.get('futures_net_short') or '—'}</td>
           <td style="color:#94a3b8">{r.get('usdtwd_rate') or '—'}</td>
-          <td style="color:#94a3b8">{f\"{r.get('index_m1_pct'):+.1f}%\" if r.get('index_m1_pct') else '—'}</td>
+          <td style="color:#94a3b8">{idx_pct_str}</td>
           <td style="font-size:11px;color:#64748b">{(wp[:40] + '…') if len(wp) > 40 else wp}</td>
         </tr>"""
 
@@ -284,9 +285,9 @@ tr:hover td{{background:#111827}}
       <tr><td style="color:#64748b;font-size:12px">USD/TWD</td>
           <td style="color:#e2e8f0">{latest.get('usdtwd_rate') or '—'}</td></tr>
       <tr><td style="color:#64748b;font-size:12px">台幣月貶值</td>
-          <td style="color:#f87171">{f\"{latest.get('usdtwd_deprec_pct'):+.2f}%\" if latest.get('usdtwd_deprec_pct') else '—'}</td></tr>
+          <td style="color:#f87171">{(str(f"{latest.get('usdtwd_deprec_pct'):+.2f}") + "%") if latest.get('usdtwd_deprec_pct') else '—'}</td></tr>
       <tr><td style="color:#64748b;font-size:12px">大盤月漲幅</td>
-          <td style="color:#e2e8f0">{f\"{latest.get('index_m1_pct'):+.1f}%\" if latest.get('index_m1_pct') else '—'}</td></tr>
+          <td style="color:#e2e8f0">{(str(f"{latest.get('index_m1_pct'):+.1f}") + "%") if latest.get('index_m1_pct') else '—'}</td></tr>
       <tr><td style="color:#64748b;font-size:12px">外資現貨連賣</td>
           <td style="color:#e2e8f0">{latest.get('foreign_sell_days') or 0} 日</td></tr>
     </table>
