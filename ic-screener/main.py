@@ -502,7 +502,7 @@ async def lifespan(app: FastAPI):
     scheduler.shutdown(wait=False)
 
 
-app = FastAPI(title="產業委屈股篩選系統", version="1.4.1", lifespan=lifespan)
+app = FastAPI(title="產業委屈股篩選系統", version="1.5.0", lifespan=lifespan)
 
 
 # ── API Routes ────────────────────────────────────────────────────────────────
@@ -514,7 +514,7 @@ async def health():
     stocks = await fetch_all("SELECT COUNT(*) AS n FROM screener_pool_stocks WHERE is_active=TRUE")
     return {
         "status":  "ok",
-        "version": "1.4.1",
+        "version": "1.5.0",
         "time":    datetime.datetime.now(_tz).isoformat(),
         "pools":   pools[0]["n"] if pools else 0,
         "stocks":  stocks[0]["n"] if stocks else 0,

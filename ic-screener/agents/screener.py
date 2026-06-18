@@ -78,9 +78,10 @@ async def screen_one(
     if cum_growth is None or cum_growth < cum_growth_min:
         fails.append(f"H1累積營收{cum_growth}%<{cum_growth_min}%")
 
-    q1_eps = fin_data.get("q1_eps")
+    q1_eps      = fin_data.get("q1_eps")
+    report_date = fin_data.get("report_date", "?")
     if q1_eps is None or q1_eps <= 0:
-        fails.append(f"H2 Q1 EPS={q1_eps}≤0")
+        fails.append(f"H2 EPS={q1_eps}≤0 ({report_date})")
 
     pe = None
     if price_data and q1_eps and q1_eps > 0:
