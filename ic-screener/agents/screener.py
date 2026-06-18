@@ -35,16 +35,15 @@ from utils.price      import fetch_price_metrics
 
 logger = logging.getLogger(__name__)
 
-SCORE_THRESHOLD = 2   # [TEST] 原始值=5，測試完還原
+SCORE_THRESHOLD = 5   # Layer 2 最低入選分數
 
 # 各產業池預設門檻覆寫（在 main.py _IC_POOLS cfg 設定）
-# [TEST] 原始值: cum_growth_min=30, pe_max=20, capital_min=20, vol_min=1000, debt_max=50
 _DEFAULT_CFG = {
-    "cum_growth_min": 5,    # [TEST] 原始=30
-    "pe_max":         60,   # [TEST] 原始=20
-    "capital_min":    5,    # [TEST] 原始=20
-    "vol_min":        100,  # [TEST] 原始=1000
-    "debt_max":       80,   # [TEST] 原始=50
+    "cum_growth_min": 30,   # H1 累積營收年成長下限 (%)
+    "pe_max":         20,   # H3 本益比上限
+    "capital_min":    20,   # H4 股本下限 (億)
+    "vol_min":        1000, # H5 3日均量下限 (張)
+    "debt_max":       50,   # H6 負債比上限 (%)
 }
 
 
