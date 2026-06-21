@@ -121,7 +121,7 @@ async def _send_report(r: dict):
         "*關鍵數據：*",
         f"• 台指期外資淨空單：{r['futures_net_short']:,} 口",
         f"• USD/TWD：{r['usdtwd_rate']} （月變化 {r['usdtwd_deprec_pct']:+.2f}%）",
-        f"• 大盤月漲幅：{r['index_m1_pct']:+.1f}%" if r['index_m1_pct'] else "• 大盤：無資料",
+        f"• 大盤月漲幅：{r.get('index_m1_pct'):+.1f}%" if r.get('index_m1_pct') else "• 大盤：無資料",
         f"• 外資現貨連賣：{r['foreign_sell_days']} 日",
     ]
 
@@ -356,7 +356,7 @@ tr:hover td{{background:#111827}}
     <div style="font-size:12px;color:#94a3b8;margin-top:10px">{latest.get('action_text','—')}</div>
   </div>
   <div class="card">
-    <div class="card-title">8 維信號分解</div>
+    <div class="card-title">9 維信號分解</div>
     {dims_html}
   </div>
   <div class="card">
