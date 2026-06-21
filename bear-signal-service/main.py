@@ -68,6 +68,7 @@ ALTER TABLE bear_market_indicators ADD COLUMN IF NOT EXISTS d9_news NUMERIC(5,1)
 ALTER TABLE bear_market_indicators ADD COLUMN IF NOT EXISTS news_summary TEXT;
 ALTER TABLE bear_market_indicators ADD COLUMN IF NOT EXISTS news_risk_level VARCHAR(10);
 ALTER TABLE bear_market_indicators ADD COLUMN IF NOT EXISTS news_black_swan TEXT;
+ALTER TABLE bear_market_indicators ADD COLUMN IF NOT EXISTS news_key_risks TEXT;
 """
 
 
@@ -194,9 +195,81 @@ async def manual_stop_loss():
 
 @app.get("/alerts/stop-loss")
 async def stop_loss_check():
-    """即時查詢停損預警（不推播）。"""
+    """即時查詢停損預警 JSON（不推播）。"""
     result = await check_stop_loss()
     return result
+
+
+@app.get("/stop-loss", response_class=HTMLResponse)
+async def stop_loss_page():
+    """停損預警 HTML 儀表板。"""
+    now_str = datetime.datetime.now(_TZ8).strftime("%Y-%m-%d %H:%M")
+    result  = await check_stop_loss()
+    triggered = result.get("triggered", [])
+    checked   = result.get("checked", 0)
+
+    rows_html = ""
+    for t in triggered:
+        emoji  = "🔴" if t["alert_type"] == "STOP_LOSS" else "🟠"
+        color  = "#ef4444" if t["alert_type"] == "STOP_LOSS" else "#f97316"
+        label  = "停損" if t["alert_type"] == "STOP_LOSS" else "快速下跌"
+        rows_html += f"""<tr>
+          <td>{emoji} <span style="color:#e2e8f0;font-weight:600">{t['stock_code']}</span></td>
+          <td style="color:#94a3b8">{t.get('stock_name','')}</td>
+          <td style="color:#64748b;font-size:12px">{t.get('pool','')}</td>
+          <td style="color:#94a3b8">{t['screen_date']}</td>
+          <td style="color:#94a3b8">{t['entry_price']}</td>
+          <td style="color:#94a3b8">{t['current']}</td>
+          <td style="color:{color};font-weight:700">{t['drop_pct']:+.1f}%</td>
+          <td><span style="color:{color};font-size:12px">{label}</span></td>
+        </tr>"""
+
+    if not rows_html:
+        rows_html = '<tr><td colspan="8" style="text-align:center;padding:24px;color:#475569">✅ 目前無觸發預警</td></tr>'
+
+    return f"""<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>停損預警</title>
+<link href="https://fonts.googleapis.com/css2?family=Noto+Sans+TC:wght@400;600;700&display=swap" rel="stylesheet">
+<style>
+*{{box-sizing:border-box;margin:0;padding:0}}
+body{{background:#0a0f1e;color:#e2e8f0;font-family:'Noto Sans TC',sans-serif}}
+.topbar{{background:#0f172a;border-bottom:1px solid #1e293b;padding:12px 24px;
+  display:flex;align-items:center;justify-content:space-between;position:sticky;top:0;z-index:100}}
+.topbar h1{{font-size:17px;color:#38bdf8;font-weight:700}}
+.meta{{font-size:12px;color:#475569}}
+.main{{padding:20px 24px;max-width:1200px;margin:0 auto}}
+.card{{background:#0f172a;border:1px solid #1e293b;border-radius:10px;padding:16px 20px;margin-bottom:16px}}
+.card-title{{font-size:11px;color:#64748b;text-transform:uppercase;letter-spacing:.8px;margin-bottom:12px}}
+table{{width:100%;border-collapse:collapse;font-size:13px}}
+th{{background:#080d1a;color:#475569;padding:9px 8px;text-align:left;font-size:11px;border-bottom:1px solid #1e293b}}
+td{{padding:9px 8px;border-bottom:1px solid #0a0f1e}}
+tr:hover td{{background:#111827}}
+a{{color:#38bdf8;text-decoration:none;font-size:13px}}
+</style>
+</head>
+<body>
+<div class="topbar">
+  <h1>🛑 停損預警</h1>
+  <div class="meta">更新：{now_str}　<a href="/dashboard">← 返回主儀表板</a></div>
+</div>
+<div class="main">
+  <div class="card">
+    <div class="card-title">監控中：{checked} 檔　｜　觸發預警：{len(triggered)} 檔</div>
+    <div style="overflow-x:auto">
+    <table>
+      <thead><tr>
+        <th>代碼</th><th>名稱</th><th>池別</th><th>篩選日</th>
+        <th>入場價</th><th>現價</th><th>跌幅</th><th>類型</th>
+      </tr></thead>
+      <tbody>{rows_html}</tbody>
+    </table>
+    </div>
+  </div>
+</div>
+</body></html>"""
 
 
 @app.get("/news/latest")
@@ -306,6 +379,11 @@ async def dashboard():
         f'<div style="color:#ef4444;font-size:12px;margin-top:4px">🚨 {h}</div>'
         for h in black_swan_raw.split(";") if h.strip()
     ) if black_swan_raw else ""
+    key_risks_raw = latest.get("news_key_risks") or ""
+    key_risks_html = "".join(
+        f'<div style="color:#fbbf24;font-size:12px;margin-top:4px">⚠ {k}</div>'
+        for k in key_risks_raw.split(";") if k.strip()
+    ) if key_risks_raw else ""
 
     return f"""<!DOCTYPE html>
 <html lang="zh-Hant">
@@ -381,8 +459,9 @@ tr:hover td{{background:#111827}}
     </div>
     <div style="font-size:12px;color:#94a3b8;margin-bottom:4px">{news_summary}</div>
     {black_swan_html}
+    {key_risks_html}
     <div style="margin-top:12px">
-      <a href="/alerts/stop-loss" style="color:#38bdf8;font-size:12px;text-decoration:none">
+      <a href="/stop-loss" style="color:#38bdf8;font-size:12px;text-decoration:none">
         🛑 查看停損預警 →
       </a>
     </div>

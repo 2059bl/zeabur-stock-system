@@ -298,7 +298,8 @@ async def save_signal(result: dict):
     """將信號結果寫入 bear_market_indicators 表。"""
     sig_date = (datetime.date.fromisoformat(result["date"])
                 if isinstance(result["date"], str) else result["date"])
-    black_swan_text = "; ".join(result.get("news_black_swan", []))[:500] or None
+    black_swan_text  = "; ".join(result.get("news_black_swan", []))[:500] or None
+    key_risks_text   = "; ".join(result.get("news_key_risks", []))[:500] or None
     await execute("""
         INSERT INTO bear_market_indicators
             (signal_date, total_score, signal_level,
@@ -308,8 +309,8 @@ async def save_signal(result: dict):
              usdtwd_rate, usdtwd_deprec_pct,
              margin_chg_pct, short_ratio, index_m1_pct,
              weakening_pools, news_summary, news_risk_level, news_black_swan,
-             action_text)
-        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24)
+             news_key_risks, action_text)
+        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25)
         ON CONFLICT (signal_date) DO UPDATE SET
             total_score       = EXCLUDED.total_score,
             signal_level      = EXCLUDED.signal_level,
@@ -333,6 +334,7 @@ async def save_signal(result: dict):
             news_summary      = EXCLUDED.news_summary,
             news_risk_level   = EXCLUDED.news_risk_level,
             news_black_swan   = EXCLUDED.news_black_swan,
+            news_key_risks    = EXCLUDED.news_key_risks,
             action_text       = EXCLUDED.action_text,
             updated_at        = NOW()
     """,
@@ -350,5 +352,6 @@ async def save_signal(result: dict):
         result.get("news_summary"),
         result.get("news_risk_level"),
         black_swan_text,
+        key_risks_text,
         result["action"],
     )
