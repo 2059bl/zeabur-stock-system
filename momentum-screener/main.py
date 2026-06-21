@@ -1025,7 +1025,6 @@ async def dashboard():
             WHERE i.trade_date = (SELECT MAX(trade_date) FROM institutional_daily)
               AND s.is_active = TRUE
             ORDER BY ABS(i.foreign_net) DESC
-            LIMIT 20
         """),
         fetch_all("SELECT stock_code FROM stocks WHERE is_active=TRUE"),
     )
@@ -1134,14 +1133,17 @@ async def dashboard():
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<meta http-equiv="refresh" content="300">
 <title>台股動量篩選儀表板</title>
-<link rel="preconnect" href="https://fonts.googleapis.com">
-<link href="https://fonts.googleapis.com/css2?family=Noto+Sans+TC:wght@400;600;700&display=swap" rel="stylesheet">
 <style>
   *{{box-sizing:border-box;margin:0;padding:0}}
-  body{{background:#0a0f1e;color:#e2e8f0;font-family:'Noto Sans TC',sans-serif;min-height:100vh}}
-  .topbar{{background:#0f172a;border-bottom:1px solid #1e293b;padding:12px 24px;display:flex;align-items:center;justify-content:space-between;position:sticky;top:0;z-index:100}}
+  body{{background:#0a0f1e;color:#e2e8f0;font-family:-apple-system,'PingFang TC','Microsoft JhengHei',sans-serif;min-height:100vh}}
+  .navbar{{background:#0f172a;border-bottom:1px solid #1e293b;padding:10px 20px;
+    display:flex;align-items:center;gap:6px;flex-wrap:wrap;position:sticky;top:0;z-index:101}}
+  .navbar span{{font-size:13px;color:#38bdf8;font-weight:700;margin-right:8px}}
+  .navbar a{{font-size:12px;color:#64748b;text-decoration:none;padding:4px 10px;
+    border-radius:4px;border:1px solid #1e293b}}
+  .navbar a:hover,.navbar a.active{{color:#e2e8f0;background:#1e293b}}
+  .topbar{{background:#0f172a;border-bottom:1px solid #1e293b;padding:12px 24px;display:flex;align-items:center;justify-content:space-between;position:sticky;top:41px;z-index:100}}
   .topbar h1{{font-size:17px;color:#38bdf8;font-weight:700;letter-spacing:.5px}}
   .topbar .meta{{font-size:12px;color:#475569;display:flex;gap:16px;align-items:center}}
   .refresh-dot{{width:8px;height:8px;border-radius:50%;background:#22c55e;animation:pulse 2s infinite}}
@@ -1168,13 +1170,21 @@ async def dashboard():
 </style>
 </head>
 <body>
+<div class="navbar">
+  <span>🐻 台股監控</span>
+  <a href="https://twstock-agent-1781283629.zeabur.app/dashboard">📊 量化系統</a>
+  <a href="https://momentum-screener.zeabur.app/dashboard" class="active">⚡ 動量篩選</a>
+  <a href="https://ic-screener.zeabur.app/dashboard">🔬 委屈股</a>
+  <a href="https://bear-signal-service.zeabur.app/dashboard">🐻 空頭信號</a>
+  <a href="https://bear-signal-service.zeabur.app/stop-loss">🛑 停損預警</a>
+</div>
 <div class="topbar">
-  <h1>📈 台股動量篩選儀表板</h1>
+  <h1>⚡ 台股動量篩選儀表板</h1>
   <div class="meta">
     <div class="refresh-dot"></div>
-    <span>5分鐘自動刷新</span>
+    <span>排程 22:00</span>
     <span>更新：{now_str}</span>
-    <span id="cd" class="countdown"></span>
+    <span id="cd" class="countdown" style="color:#38bdf8"></span>
   </div>
 </div>
 <div class="main">
@@ -1194,7 +1204,7 @@ async def dashboard():
   <div class="stat">
     <div class="label">法人資料股數</div>
     <div class="val">{len(inst_rows)}</div>
-    <div class="sub">最大買超前15檔</div>
+    <div class="sub">全數追蹤股</div>
   </div>
   <div class="stat">
     <div class="label">除權息預警</div>
@@ -1229,7 +1239,7 @@ async def dashboard():
 
 <div id="inst" class="tab-content">
   <div class="card">
-    <div class="section-title">三大法人買賣超（{inst_date}，按外資絕對值排序前15）</div>
+    <div class="section-title">三大法人買賣超（{inst_date}，按外資絕對值排序）</div>
     <div style="overflow-x:auto">
     <table>
       <thead><tr>
@@ -1268,15 +1278,7 @@ function switchTab(id){{
   document.getElementById(id).classList.add('active');
   event.target.classList.add('active');
 }}
-// 倒數計時器
-(function(){{
-  var left=300;
-  var el=document.getElementById('cd');
-  setInterval(function(){{
-    left--;if(left<=0)left=300;
-    var m=Math.floor(left/60),s=left%60;
-    el.textContent='刷新倒數 '+m+':'+(s<10?'0':'')+s;
-  }},1000);
-}})();
+let s=300;const cd=document.getElementById('cd');
+setInterval(()=>{{s--;cd.textContent=s>0?`${{Math.floor(s/60)}}:${{String(s%60).padStart(2,'0')}} 後刷新`:'刷新中...';if(s<=0)location.reload();}},1000);
 </script>
 </body></html>"""

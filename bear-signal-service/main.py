@@ -232,12 +232,17 @@ async def stop_loss_page():
 <head>
 <meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>停損預警</title>
-<link href="https://fonts.googleapis.com/css2?family=Noto+Sans+TC:wght@400;600;700&display=swap" rel="stylesheet">
 <style>
 *{{box-sizing:border-box;margin:0;padding:0}}
-body{{background:#0a0f1e;color:#e2e8f0;font-family:'Noto Sans TC',sans-serif}}
+body{{background:#0a0f1e;color:#e2e8f0;font-family:-apple-system,'PingFang TC','Microsoft JhengHei',sans-serif}}
+.navbar{{background:#0f172a;border-bottom:1px solid #1e293b;padding:10px 20px;
+  display:flex;align-items:center;gap:6px;flex-wrap:wrap;position:sticky;top:0;z-index:101}}
+.navbar span{{font-size:13px;color:#38bdf8;font-weight:700;margin-right:8px}}
+.navbar a{{font-size:12px;color:#64748b;text-decoration:none;padding:4px 10px;
+  border-radius:4px;border:1px solid #1e293b}}
+.navbar a:hover,.navbar a.active{{color:#e2e8f0;background:#1e293b}}
 .topbar{{background:#0f172a;border-bottom:1px solid #1e293b;padding:12px 24px;
-  display:flex;align-items:center;justify-content:space-between;position:sticky;top:0;z-index:100}}
+  display:flex;align-items:center;justify-content:space-between;position:sticky;top:41px;z-index:100}}
 .topbar h1{{font-size:17px;color:#38bdf8;font-weight:700}}
 .meta{{font-size:12px;color:#475569}}
 .main{{padding:20px 24px;max-width:1200px;margin:0 auto}}
@@ -251,9 +256,17 @@ a{{color:#38bdf8;text-decoration:none;font-size:13px}}
 </style>
 </head>
 <body>
+<div class="navbar">
+  <span>🐻 台股監控</span>
+  <a href="https://twstock-agent-1781283629.zeabur.app/dashboard">📊 量化系統</a>
+  <a href="https://momentum-screener.zeabur.app/dashboard">⚡ 動量篩選</a>
+  <a href="https://ic-screener.zeabur.app/dashboard">🔬 委屈股</a>
+  <a href="https://bear-signal-service.zeabur.app/dashboard">🐻 空頭信號</a>
+  <a href="https://bear-signal-service.zeabur.app/stop-loss" class="active">🛑 停損預警</a>
+</div>
 <div class="topbar">
   <h1>🛑 停損預警</h1>
-  <div class="meta">更新：{now_str}　<a href="/dashboard">← 返回主儀表板</a></div>
+  <div class="meta">更新：{now_str}</div>
 </div>
 <div class="main">
   <div class="card">
@@ -354,14 +367,17 @@ async def dashboard():
         idx_pct_str = (f"{r.get('index_m1_pct'):+.1f}%" if r.get('index_m1_pct') else '—')
         nr = r.get("news_risk_level") or "LOW"
         nrc = {"EXTREME":"#ef4444","HIGH":"#f97316","MEDIUM":"#eab308","LOW":"#22c55e"}.get(nr,"#64748b")
+        sell_days = r.get("foreign_sell_days") or 0
+        sell_c = "#ef4444" if sell_days >= 5 else "#f97316" if sell_days >= 3 else "#94a3b8"
         history_html += f"""<tr>
           <td style="color:#94a3b8">{r['signal_date']}</td>
           <td style="color:{lc};font-weight:700">{r.get('total_score',0)}</td>
           <td><span style="color:{lc}">{r.get('signal_level','—')}</span></td>
+          <td style="color:{sell_c};font-weight:600">{sell_days}日</td>
           <td style="color:#94a3b8">{r.get('futures_net_short') or '—'}</td>
           <td style="color:#94a3b8">{r.get('usdtwd_rate') or '—'}</td>
           <td style="color:#94a3b8">{idx_pct_str}</td>
-          <td style="font-size:11px;color:#64748b">{(wp[:40] + '…') if len(wp) > 40 else wp}</td>
+          <td style="font-size:11px;color:#64748b">{(wp[:35] + '…') if len(wp) > 35 else wp}</td>
           <td style="color:{nrc};font-size:11px;font-weight:600">{nr}</td>
         </tr>"""
 
@@ -389,14 +405,18 @@ async def dashboard():
 <html lang="zh-Hant">
 <head>
 <meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<meta http-equiv="refresh" content="300">
 <title>外資離場信號儀表板</title>
-<link href="https://fonts.googleapis.com/css2?family=Noto+Sans+TC:wght@400;600;700&display=swap" rel="stylesheet">
 <style>
 *{{box-sizing:border-box;margin:0;padding:0}}
-body{{background:#0a0f1e;color:#e2e8f0;font-family:'Noto Sans TC',sans-serif}}
+body{{background:#0a0f1e;color:#e2e8f0;font-family:-apple-system,'PingFang TC','Microsoft JhengHei',sans-serif}}
+.navbar{{background:#0f172a;border-bottom:1px solid #1e293b;padding:10px 20px;
+  display:flex;align-items:center;gap:6px;flex-wrap:wrap;position:sticky;top:0;z-index:101}}
+.navbar span{{font-size:13px;color:#38bdf8;font-weight:700;margin-right:8px}}
+.navbar a{{font-size:12px;color:#64748b;text-decoration:none;padding:4px 10px;
+  border-radius:4px;border:1px solid #1e293b}}
+.navbar a:hover,.navbar a.active{{color:#e2e8f0;background:#1e293b}}
 .topbar{{background:#0f172a;border-bottom:1px solid #1e293b;padding:12px 24px;
-  display:flex;align-items:center;justify-content:space-between;position:sticky;top:0;z-index:100}}
+  display:flex;align-items:center;justify-content:space-between;position:sticky;top:41px;z-index:100}}
 .topbar h1{{font-size:17px;color:#38bdf8;font-weight:700}}
 .meta{{font-size:12px;color:#475569;display:flex;gap:16px;align-items:center}}
 .dot{{width:8px;height:8px;border-radius:50%;background:#22c55e;animation:pulse 2s infinite}}
@@ -416,12 +436,22 @@ tr:hover td{{background:#111827}}
 </style>
 </head>
 <body>
+<div class="navbar">
+  <span>🐻 台股監控</span>
+  <a href="https://twstock-agent-1781283629.zeabur.app/dashboard">📊 量化系統</a>
+  <a href="https://momentum-screener.zeabur.app/dashboard">⚡ 動量篩選</a>
+  <a href="https://ic-screener.zeabur.app/dashboard">🔬 委屈股</a>
+  <a href="https://bear-signal-service.zeabur.app/dashboard" class="active">🐻 空頭信號</a>
+  <a href="https://bear-signal-service.zeabur.app/stop-loss">🛑 停損預警</a>
+</div>
 <div class="topbar">
   <h1>🐻 外資離場空頭信號系統</h1>
   <div class="meta">
     <div class="dot"></div>
-    <span>5分鐘自動刷新</span>
+    <span>排程 22:30</span>
     <span>更新：{now_str}</span>
+    <span id="cd" style="color:#38bdf8"></span>
+    <button onclick="triggerSignal()" style="background:#1e293b;color:#38bdf8;border:1px solid #334155;padding:5px 12px;border-radius:6px;font-size:12px;cursor:pointer">▶ 立即執行</button>
   </div>
 </div>
 <div class="main">
@@ -474,12 +504,19 @@ tr:hover td{{background:#111827}}
   <table>
     <thead><tr>
       <th>日期</th><th>評分</th><th>等級</th>
-      <th>期貨淨空</th><th>USD/TWD</th><th>大盤月漲</th><th>轉弱產業</th><th>新聞風險</th>
+      <th>外資連賣</th><th>期貨淨空</th><th>USD/TWD</th><th>大盤月漲</th><th>轉弱產業</th><th>新聞風險</th>
     </tr></thead>
-    <tbody>{history_html or '<tr><td colspan="8" style="text-align:center;padding:20px;color:#475569">尚未執行</td></tr>'}</tbody>
+    <tbody>{history_html or '<tr><td colspan="9" style="text-align:center;padding:20px;color:#475569">尚未執行</td></tr>'}</tbody>
   </table>
   </div>
 </div>
 
 </div>
+<script>
+let s=300;const cd=document.getElementById('cd');
+setInterval(()=>{{s--;cd.textContent=s>0?`${{Math.floor(s/60)}}:${{String(s%60).padStart(2,'0')}} 後刷新`:'刷新中...';if(s<=0)location.reload();}},1000);
+function triggerSignal(){{
+  fetch('/run/signal',{{method:'POST'}}).then(r=>r.json()).then(d=>alert('已觸發：'+JSON.stringify(d)));
+}}
+</script>
 </body></html>"""

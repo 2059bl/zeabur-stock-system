@@ -469,27 +469,28 @@ async def telegram_webhook(update: dict, background_tasks: BackgroundTasks):
 @app.get("/dashboard", response_class=HTMLResponse)
 async def dashboard():
     """即時監控儀表板（純 HTML，無需前端框架）。"""
-    rows = await fetch_all("""
-        SELECT
-            li.stock_code, s.stock_name, s.sector, s.market,
-            li.trade_date,
-            li.rsi_14, li.macd_histogram, li.bias_rate,
-            li.is_bear_alignment, li.institution_flow,
-            li.foreign_consecutive_days, li.foreign_holding_ratio,
-            li.short_to_margin_ratio, li.short_cover_days,
-            li.composite_score, li.sentiment_score,
-            ar.recommendation AS ai_rec
-        FROM latest_indicators li
-        JOIN stocks s ON s.stock_code = li.stock_code
-        LEFT JOIN LATERAL (
-            SELECT recommendation FROM ai_reports
-            WHERE stock_code = li.stock_code AND report_type = 'DECISION'
-            ORDER BY created_at DESC LIMIT 1
-        ) ar ON TRUE
-        ORDER BY li.composite_score DESC NULLS LAST
-    """)
-
-    mkt = await compute_market_bear_signal()
+    rows, mkt = await asyncio.gather(
+        fetch_all("""
+            SELECT
+                li.stock_code, s.stock_name, s.sector, s.market,
+                li.trade_date,
+                li.rsi_14, li.macd_histogram, li.bias_rate,
+                li.is_bear_alignment, li.institution_flow,
+                li.foreign_consecutive_days, li.foreign_holding_ratio,
+                li.short_to_margin_ratio, li.short_cover_days,
+                li.composite_score, li.sentiment_score,
+                ar.recommendation AS ai_rec
+            FROM latest_indicators li
+            JOIN stocks s ON s.stock_code = li.stock_code
+            LEFT JOIN LATERAL (
+                SELECT recommendation FROM ai_reports
+                WHERE stock_code = li.stock_code AND report_type = 'DECISION'
+                ORDER BY created_at DESC LIMIT 1
+            ) ar ON TRUE
+            ORDER BY li.composite_score DESC NULLS LAST
+        """),
+        compute_market_bear_signal(),
+    )
 
     def fmt(v, decimals=2):
         if v is None:
@@ -519,33 +520,6 @@ async def dashboard():
         labels = {"DOUBLE_SELL": "雙賣超", "SINGLE_SELL": "單賣超", "HOLD_OR_BUY": "持有/買", "DOUBLE_BUY": "雙買超"}
         return f"<span style='background:{c};color:#fff;padding:2px 6px;border-radius:3px;font-size:11px'>{labels.get(str(flow),str(flow))}</span>"
 
-    rows_html = ""
-    for r in rows:
-        sc = r.get("composite_score")
-        sc_color = score_color(sc)
-        sc_str = f"{float(sc):.0f}" if sc is not None else "—"
-        consec = r.get("foreign_consecutive_days") or 0
-        consec_str = (f"<span style='color:#e74c3c'>連賣{abs(consec)}日</span>" if consec < 0
-                      else f"<span style='color:#27ae60'>連買{consec}日</span>" if consec > 0
-                      else "—")
-        ai_rec = r.get("ai_rec") or "—"
-        rows_html += f"""
-        <tr>
-          <td><b>{r['stock_code']}</b></td>
-          <td>{r['stock_name']}</td>
-          <td><small>{r.get('sector') or ''}</small></td>
-          <td style='text-align:center'>{bear_badge(r.get('is_bear_alignment'))}</td>
-          <td style='text-align:right'>{fmt(r.get('rsi_14'))}</td>
-          <td style='text-align:right'>{fmt(r.get('macd_histogram'),4)}</td>
-          <td style='text-align:center'>{flow_badge(r.get('institution_flow'))}</td>
-          <td style='text-align:center'>{consec_str}</td>
-          <td style='text-align:right'>{fmt(r.get('foreign_holding_ratio'))}%</td>
-          <td style='text-align:right'>{fmt(r.get('short_to_margin_ratio'))}%</td>
-          <td style='text-align:right'>{fmt(r.get('short_cover_days'),1)}日</td>
-          <td style='text-align:center;font-weight:bold;color:{sc_color}'>{sc_str}</td>
-          <td style='text-align:center'><small>{ai_rec}</small></td>
-        </tr>"""
-
     _level_zh  = {"NORMAL": "正常", "WATCH": "觀察", "WARNING": "警戒", "DANGER": "危險", "EXTREME": "極度危險"}
     _level_clr = {"NORMAL": "#27ae60", "WATCH": "#2980b9", "WARNING": "#e67e22", "DANGER": "#e74c3c", "EXTREME": "#8e44ad"}
     _rec_zh    = {"BUY": "買入", "SELL": "賣出", "HOLD": "持有", "STRONG_SELL": "強力賣出",
@@ -556,10 +530,10 @@ async def dashboard():
     bear_count = sum(1 for r in rows if r.get("is_bear_alignment"))
     high_score = sum(1 for r in rows if r.get("composite_score") and float(r["composite_score"]) >= 60)
     fut_color  = "#e74c3c" if mkt.futures_foreign_net < 0 else "#27ae60"
-    update_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    _tz8       = datetime.timezone(datetime.timedelta(hours=8))
+    update_time = datetime.now(_tz8).strftime("%Y-%m-%d %H:%M")
 
-    # 重新渲染資料列（AI建議也翻中文）
-    rows_html2 = ""
+    rows_html = ""
     for r in rows:
         sc = r.get("composite_score")
         sc_color = score_color(sc)
@@ -575,7 +549,7 @@ async def dashboard():
         sent_str = (f"<span style='color:#e74c3c'>負面 {float(sentiment):.2f}</span>" if sentiment and float(sentiment) < -0.1
                     else f"<span style='color:#27ae60'>正面 {float(sentiment):.2f}</span>" if sentiment and float(sentiment) > 0.1
                     else "<span style='color:#888'>中性</span>")
-        rows_html2 += f"""
+        rows_html += f"""
         <tr>
           <td><b style='font-family:monospace'>{r['stock_code']}</b></td>
           <td>{r['stock_name']}</td>
@@ -600,44 +574,73 @@ async def dashboard():
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>台股 AI 量化系統｜監控儀表板</title>
 <style>
-  * {{ box-sizing: border-box; margin: 0; padding: 0; }}
-  body {{ font-family: -apple-system, 'PingFang TC', 'Microsoft JhengHei', sans-serif;
-          background: #0f1117; color: #e0e0e0; padding: 20px; }}
-  h1 {{ font-size: 20px; margin-bottom: 6px; color: #fff; }}
-  .subtitle {{ font-size: 12px; color: #666; margin-bottom: 16px; }}
-  .cards {{ display: flex; gap: 12px; flex-wrap: wrap; margin-bottom: 20px; }}
-  .card {{ background: #1a1d27; border-radius: 8px; padding: 14px 20px; min-width: 150px; }}
-  .card .label {{ font-size: 11px; color: #888; letter-spacing: .3px; }}
-  .card .value {{ font-size: 26px; font-weight: bold; margin-top: 4px; }}
-  .section-title {{ font-size: 13px; color: #aaa; margin: 0 0 10px; padding: 6px 0;
-                    border-bottom: 1px solid #252836; }}
-  table {{ width: 100%; border-collapse: collapse; background: #1a1d27;
-           border-radius: 8px; overflow: hidden; font-size: 13px; }}
-  th {{ background: #252836; padding: 10px 8px; text-align: left;
-        font-size: 11px; color: #bbb; white-space: nowrap; font-weight: 600; }}
-  td {{ padding: 8px 8px; border-bottom: 1px solid #1e2130; }}
-  tr:hover td {{ background: #20233a; }}
-  .tag {{ display:inline-block; padding:2px 7px; border-radius:4px; font-size:11px; font-weight:600; }}
-  .footer {{ margin-top: 12px; font-size: 11px; color: #555; text-align: right; }}
+  *{{box-sizing:border-box;margin:0;padding:0}}
+  body{{font-family:-apple-system,'PingFang TC','Microsoft JhengHei',sans-serif;
+        background:#0a0f1e;color:#e2e8f0}}
+  .navbar{{background:#0f172a;border-bottom:1px solid #1e293b;padding:10px 20px;
+    display:flex;align-items:center;gap:6px;flex-wrap:wrap;position:sticky;top:0;z-index:100}}
+  .navbar span{{font-size:13px;color:#38bdf8;font-weight:700;margin-right:8px}}
+  .navbar a{{font-size:12px;color:#64748b;text-decoration:none;padding:4px 10px;
+    border-radius:4px;border:1px solid #1e293b}}
+  .navbar a:hover,.navbar a.active{{color:#e2e8f0;background:#1e293b}}
+  .topbar{{background:#0f172a;padding:12px 20px;display:flex;align-items:center;
+    justify-content:space-between;border-bottom:1px solid #1e293b}}
+  .topbar h1{{font-size:17px;color:#fff;font-weight:700}}
+  .meta{{font-size:12px;color:#475569;display:flex;gap:12px;align-items:center}}
+  .dot{{width:8px;height:8px;border-radius:50%;background:#22c55e;animation:pulse 2s infinite}}
+  @keyframes pulse{{0%,100%{{opacity:1}}50%{{opacity:.4}}}}
+  .main{{padding:20px;max-width:1600px;margin:0 auto}}
+  .cards{{display:flex;gap:12px;flex-wrap:wrap;margin-bottom:20px}}
+  .card{{background:#0f172a;border:1px solid #1e293b;border-radius:8px;padding:14px 18px;min-width:140px}}
+  .card .label{{font-size:11px;color:#64748b;letter-spacing:.3px}}
+  .card .value{{font-size:24px;font-weight:700;margin-top:4px}}
+  .trigger-btn{{background:#1e293b;color:#38bdf8;border:1px solid #334155;padding:6px 14px;
+    border-radius:6px;font-size:12px;cursor:pointer;font-family:inherit}}
+  .trigger-btn:hover{{background:#334155}}
+  .section-title{{font-size:13px;color:#94a3b8;margin:0 0 10px;padding:6px 0;
+    border-bottom:1px solid #1e293b;display:flex;justify-content:space-between;align-items:center}}
+  table{{width:100%;border-collapse:collapse;background:#0f172a;border-radius:8px;
+    overflow:hidden;font-size:13px}}
+  th{{background:#080d1a;padding:9px 8px;text-align:left;font-size:11px;color:#475569;
+    white-space:nowrap;font-weight:600;border-bottom:1px solid #1e293b}}
+  td{{padding:8px 8px;border-bottom:1px solid #0a0f1e}}
+  tr:hover td{{background:#111827}}
+  .footer{{margin-top:12px;font-size:11px;color:#475569;text-align:right}}
 </style>
-<meta http-equiv="refresh" content="300">
 </head>
 <body>
-<h1>📊 台股 AI 量化監控系統</h1>
-<div class="subtitle">版本 v4.0 ／ 自動刷新：每 5 分鐘 ／ 最後更新：{update_time}</div>
+<div class="navbar">
+  <span>🐻 台股監控</span>
+  <a href="https://twstock-agent-1781283629.zeabur.app/dashboard" class="active">📊 量化系統</a>
+  <a href="https://momentum-screener.zeabur.app/dashboard">⚡ 動量篩選</a>
+  <a href="https://ic-screener.zeabur.app/dashboard">🔬 委屈股</a>
+  <a href="https://bear-signal-service.zeabur.app/dashboard">🐻 空頭信號</a>
+  <a href="https://bear-signal-service.zeabur.app/stop-loss">🛑 停損預警</a>
+</div>
+<div class="topbar">
+  <h1>📊 台股 AI 量化監控系統</h1>
+  <div class="meta">
+    <div class="dot"></div>
+    <span>v4.1.0</span>
+    <span>排程 22:00</span>
+    <span>更新：{update_time}</span>
+    <span id="cd" style="color:#38bdf8"></span>
+  </div>
+</div>
+<div class="main">
 
 <div class="cards">
   <div class="card">
     <div class="label">追蹤股票</div>
-    <div class="value" style="color:#3498db">{len(rows)} 檔</div>
+    <div class="value" style="color:#38bdf8">{len(rows)} 檔</div>
   </div>
   <div class="card">
     <div class="label">空頭排列</div>
-    <div class="value" style="color:#e74c3c">{bear_count} 檔</div>
+    <div class="value" style="color:#ef4444">{bear_count} 檔</div>
   </div>
   <div class="card">
     <div class="label">高評分（≥60分）</div>
-    <div class="value" style="color:#e67e22">{high_score} 檔</div>
+    <div class="value" style="color:#f97316">{high_score} 檔</div>
   </div>
   <div class="card">
     <div class="label">大盤風險等級</div>
@@ -655,35 +658,41 @@ async def dashboard():
     <div class="label">操作建議</div>
     <div class="value" style="color:{mkt_color};font-size:14px;margin-top:8px">{mkt.action}</div>
   </div>
+  <div class="card" style="display:flex;align-items:center">
+    <button class="trigger-btn" onclick="triggerSignal()">▶ 立即執行分析</button>
+  </div>
 </div>
 
-<div class="section-title">📋 個股即時指標（依綜合評分排序）</div>
+<div class="section-title">
+  <span>📋 個股即時指標（依綜合評分排序）</span>
+  <span style="font-size:11px;color:#475569">下次排程 22:00</span>
+</div>
+<div style="overflow-x:auto">
 <table>
 <thead>
   <tr>
-    <th>代碼</th>
-    <th>名稱</th>
-    <th>產業</th>
-    <th>均線型態</th>
-    <th>RSI(14)</th>
-    <th>MACD 柱狀</th>
-    <th>法人動向</th>
-    <th>外資連續</th>
-    <th>外資持股%</th>
-    <th>券資比%</th>
-    <th>回補天數</th>
-    <th>新聞情緒</th>
-    <th>綜合評分</th>
-    <th>AI 建議</th>
+    <th>代碼</th><th>名稱</th><th>產業</th><th>均線型態</th>
+    <th>RSI(14)</th><th>MACD 柱狀</th><th>法人動向</th><th>外資連續</th>
+    <th>外資持股%</th><th>券資比%</th><th>回補天數</th>
+    <th>新聞情緒</th><th>綜合評分</th><th>AI 建議</th>
   </tr>
 </thead>
-<tbody>{rows_html2}</tbody>
+<tbody>{rows_html}</tbody>
 </table>
+</div>
 
 <div class="footer">
-  每日 22:00 自動執行完整分析（報價→技術指標→籌碼→新聞情緒→評分→AI決策→Telegram推播）<br>
-  空頭排列：5MA &lt; 20MA &lt; 60MA ／ 綜合評分：空頭(25)+RSI(25)+外資連賣(20)+券資比(15)+新聞情緒(15)
+  每日 22:00 自動執行（報價→技術指標→籌碼→新聞情緒→評分→AI決策→Telegram推播）<br>
+  空頭排列：5MA &lt; 20MA &lt; 60MA　綜合評分：空頭(25)+RSI(25)+外資連賣(20)+券資比(15)+新聞情緒(15)
 </div>
+</div>
+<script>
+let s=300;const cd=document.getElementById('cd');
+setInterval(()=>{{s--;cd.textContent=s>0?`${Math.floor(s/60)}:${String(s%60).padStart(2,'0')} 後刷新`:'刷新中...';if(s<=0)location.reload();}},1000);
+function triggerSignal(){{
+  fetch('/run/daily',{{method:'POST'}}).then(r=>r.json()).then(d=>alert('已觸發：'+JSON.stringify(d)));
+}}
+</script>
 </body>
 </html>"""
     return HTMLResponse(content=html)
