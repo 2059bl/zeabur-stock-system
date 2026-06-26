@@ -77,14 +77,15 @@ async def fetch_institutional_flows(stock_code: str, trade_date: datetime.date) 
         buy  = int(rec.get("buy",  0) or 0) // 1000   # 股 → 張
         sell = int(rec.get("sell", 0) or 0) // 1000
         net  = buy - sell
-        if name in ("Foreign_Investor", "Foreign_Dealer_Self"):
+        if name in ("Foreign_Investor", "Foreign_Dealer_Self",
+                    "外資", "外資自營", "外資及陸資(不含外資自營商)", "外資自營商"):
             by_date[d]["foreign"] += net
-            if d == str(trade_date) and name == "Foreign_Investor":
+            if d == str(trade_date) and name in ("Foreign_Investor", "外資", "外資及陸資(不含外資自營商)"):
                 result["foreign_buy"]  = buy
                 result["foreign_sell"] = sell
-        elif name == "Investment_Trust":
+        elif name in ("Investment_Trust", "投信"):
             by_date[d]["trust"] += net
-        elif name in ("Dealer_self", "Dealer_Hedging"):
+        elif name in ("Dealer_self", "Dealer_Hedging", "自營商", "自營商(自行買賣)", "自營商(避險)"):
             by_date[d]["dealer"] += net
 
     # 今日合計
@@ -157,7 +158,8 @@ async def fetch_consecutive_foreign_days(stock_code: str,
     for rec in records:
         d    = rec.get("date", "")
         name = rec.get("name", "")
-        if name in ("Foreign_Investor", "Foreign_Dealer_Self"):
+        if name in ("Foreign_Investor", "Foreign_Dealer_Self",
+                    "外資", "外資自營", "外資及陸資(不含外資自營商)", "外資自營商"):
             buy  = int(rec.get("buy",  0) or 0) // 1000
             sell = int(rec.get("sell", 0) or 0) // 1000
             by_date[d] = by_date.get(d, 0) + (buy - sell)

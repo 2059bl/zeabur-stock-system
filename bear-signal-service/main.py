@@ -61,6 +61,7 @@ CREATE TABLE IF NOT EXISTS bear_market_indicators (
     news_summary        TEXT,
     news_risk_level     VARCHAR(10),
     news_black_swan     TEXT,
+    news_key_risks      TEXT,
     action_text         TEXT,
     updated_at          TIMESTAMPTZ DEFAULT NOW()
 );
