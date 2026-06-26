@@ -4,11 +4,8 @@ import httpx
 
 logger = logging.getLogger(__name__)
 
-TELEGRAM_BOT_TOKEN = os.environ.get(
-    "TELEGRAM_BOT_TOKEN",
-    "8141519967:AAFodUHthSpQsFTN_4E4iUdm7tPEn_Sb9jE",
-)
-TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "8745415790")
+TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
+TELEGRAM_CHAT_ID   = os.environ.get("TELEGRAM_CHAT_ID", "")
 
 _URL = "https://api.telegram.org/bot{token}/sendMessage"
 

@@ -15,7 +15,7 @@ import datetime
 
 logger = logging.getLogger(__name__)
 
-FINMIND_TOKEN = os.environ.get("FINMIND_TOKEN", "")
+FINMIND_TOKEN = os.environ.get("FINMIND_TOKEN") or os.environ.get("FINMIND_API_KEY", "")
 FINMIND_BASE  = "https://api.finmindtrade.com/api/v4/data"
 
 # FinMind 季報日期後綴：Q1=03, Q2=06, Q3=09, Q4=12

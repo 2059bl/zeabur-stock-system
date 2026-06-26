@@ -9,7 +9,6 @@ logger = logging.getLogger(__name__)
 
 BOT_TOKEN  = os.environ.get("TELEGRAM_BOT_TOKEN", "")
 CHAT_ID    = os.environ.get("TELEGRAM_CHAT_ID", "")
-_BASE      = f"https://api.telegram.org/bot{BOT_TOKEN}"
 
 
 async def send_message(text: str, chat_id: str = "") -> bool:
@@ -20,12 +19,14 @@ async def send_message(text: str, chat_id: str = "") -> bool:
     if not target:
         logger.warning("TELEGRAM_CHAT_ID 未設定")
         return False
+    base = f"https://api.telegram.org/bot{BOT_TOKEN}"
     try:
         async with httpx.AsyncClient(timeout=15) as c:
-            r = await c.post(f"{_BASE}/sendMessage", json={
-                "chat_id":    target,
-                "text":       text,
-                "parse_mode": "Markdown",
+            r = await c.post(f"{base}/sendMessage", json={
+                "chat_id":                  target,
+                "text":                     text,
+                "parse_mode":               "Markdown",
+                "disable_web_page_preview": True,
             })
             return r.status_code == 200
     except Exception as e:
@@ -44,10 +45,11 @@ async def send_photo(
     target = chat_id or CHAT_ID
     if not target:
         return False
+    base = f"https://api.telegram.org/bot{BOT_TOKEN}"
     try:
         async with httpx.AsyncClient(timeout=30) as c:
             r = await c.post(
-                f"{_BASE}/sendPhoto",
+                f"{base}/sendPhoto",
                 data={"chat_id": target, "caption": caption, "parse_mode": "Markdown"},
                 files={"photo": ("chart.png", image_bytes, "image/png")},
             )
@@ -60,15 +62,17 @@ async def send_photo(
 
 
 async def set_webhook(url: str) -> dict:
+    base = f"https://api.telegram.org/bot{BOT_TOKEN}"
     async with httpx.AsyncClient(timeout=10) as c:
-        r = await c.post(f"{_BASE}/setWebhook", json={"url": url})
+        r = await c.post(f"{base}/setWebhook", json={"url": url})
         return r.json()
 
 
 async def get_me() -> dict:
+    base = f"https://api.telegram.org/bot{BOT_TOKEN}"
     try:
         async with httpx.AsyncClient(timeout=10) as c:
-            r = await c.get(f"{_BASE}/getMe")
+            r = await c.get(f"{base}/getMe")
             return r.json()
     except Exception:
         return {}
