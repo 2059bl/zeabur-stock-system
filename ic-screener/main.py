@@ -412,14 +412,20 @@ async def _daily_price_update():
     log_id = log[0]["id"] if log else None
     try:
         stocks = await fetch_all("SELECT DISTINCT stock_code FROM screener_pool_stocks WHERE is_active=TRUE")
-        updated = 0
+        ok = 0
+        fail = 0
         for s in stocks:
             rows = await fetch_ohlcv(s["stock_code"])
             if rows:
-                updated += 1
-        logger.info(f"[Price] {today} 股價更新：{updated}/{len(stocks)} 檔成功")
+                ok += 1
+            else:
+                fail += 1
+        logger.info(f"[Price] {today} FinMind 連線確認：{ok} 檔可取得，{fail} 檔失敗")
         if log_id:
-            await execute("UPDATE screener_logs SET status='SUCCESS', finished_at=NOW() WHERE id=$1", log_id)
+            await execute(
+                "UPDATE screener_logs SET status='SUCCESS', candidates=$2, finished_at=NOW() WHERE id=$1",
+                log_id, ok,
+            )
     except Exception as e:
         logger.exception(f"股價更新失敗: {e}")
         if log_id:

@@ -72,10 +72,11 @@ async def _d1_d2_foreign_trust() -> dict:
         name = row.get("name", "")
         buy  = row.get("buy") or 0
         sell = row.get("sell") or 0
-        if name == "Foreign_Investor":
+        if name in ("Foreign_Investor", "Foreign_Dealer_Self",
+                    "外資", "外資自營", "外資及陸資(不含外資自營商)", "外資自營商"):
             day_foreign[dt]["buy"]  += buy
             day_foreign[dt]["sell"] += sell
-        elif name == "Investment_Trust":
+        elif name in ("Investment_Trust", "投信"):
             day_trust[dt]["buy"]  += buy
             day_trust[dt]["sell"] += sell
 

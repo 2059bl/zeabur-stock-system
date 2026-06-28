@@ -46,12 +46,21 @@ async def fetch_institutional(stock_code: str, trade_date: str) -> Optional[dict
     rows = await _fm_get("TaiwanStockInstitutionalInvestorsBuySell", stock_code, trade_date)
     result = {"foreign_net_buy": 0, "investment_trust_net_buy": 0, "dealer_net_buy": 0}
     name_map = {
-        "外資":           "foreign_net_buy",
-        "外資自營":        "foreign_net_buy",
-        "投信":           "investment_trust_net_buy",
-        "自營商":          "dealer_net_buy",
-        "自營商(自行買賣)": "dealer_net_buy",
-        "自營商(避險)":    "dealer_net_buy",
+        # FinMind v4 API 英文名稱（主要格式）
+        "Foreign_Investor":    "foreign_net_buy",
+        "Foreign_Dealer_Self": "foreign_net_buy",
+        "Investment_Trust":    "investment_trust_net_buy",
+        "Dealer_self":         "dealer_net_buy",
+        "Dealer_Hedging":      "dealer_net_buy",
+        # 中文名稱（部分環境或舊版 API）
+        "外資":                "foreign_net_buy",
+        "外資自營":             "foreign_net_buy",
+        "外資及陸資(不含外資自營商)": "foreign_net_buy",
+        "外資自營商":           "foreign_net_buy",
+        "投信":                "investment_trust_net_buy",
+        "自營商":               "dealer_net_buy",
+        "自營商(自行買賣)":     "dealer_net_buy",
+        "自營商(避險)":         "dealer_net_buy",
     }
     found = False
     for row in rows:
@@ -119,7 +128,8 @@ async def fetch_consecutive_foreign_days(stock_code: str, trade_date: str, lookb
     # 匯總每日外資淨買超
     daily: dict[str, int] = {}
     for row in rows:
-        if row.get("name") not in ("外資", "外資自營"):
+        if row.get("name") not in ("Foreign_Investor", "Foreign_Dealer_Self",
+                                   "外資", "外資自營", "外資及陸資(不含外資自營商)", "外資自營商"):
             continue
         d = row.get("date", "")
         net = int(row.get("buy") or 0) - int(row.get("sell") or 0)
