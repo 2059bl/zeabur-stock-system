@@ -6,7 +6,8 @@ from contextlib import asynccontextmanager
 from typing import Optional, List
 
 from fastapi import FastAPI, BackgroundTasks, Query
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
@@ -19,6 +20,7 @@ from agents.news_agent import run_news_sentiment, get_recent_news
 from agents.scoring_agent import update_composite_scores
 from agents.momentum_agent import run_momentum_screening, calculate_momentum_returns, CFG as MOMENTUM_CFG
 from utils.signals import compute_market_bear_signal
+from utils.sector_rotation import build_sector_rotation
 from utils.notifier import send_telegram, get_chat_id
 from utils.chatbot import send_message, chat_with_llm, set_webhook
 from utils.db import execute, fetch_all, get_pool
@@ -69,6 +71,13 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="台股 AI 量化系統", version="4.1.0", lifespan=lifespan)
 
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],   # 允許本機 file:// 與任何前端來源
+    allow_methods=["GET"],
+    allow_headers=["*"],
+)
+
 
 # ─── Models ───────────────────────────────────────────────────────────────────
 
@@ -96,6 +105,23 @@ async def health():
         "tracking_stocks": count[0]["n"] if count else 0,
         "version": "4.0.0",
     }
+
+
+@app.get("/api/sector-rotation")
+async def sector_rotation(trade_date: Optional[str] = Query(None, description="YYYY-MM-DD，預設今天")):
+    """
+    板塊輪動即時資料。
+    回傳 JSON 陣列，每個元素包含：
+      sector, theme, flow20, accel5, change5, stocks
+    供 tw-sector-rotation-map.html ⚡ API 功能直接拉取。
+    """
+    try:
+        data = await build_sector_rotation(today=trade_date)
+        return JSONResponse(content=data)
+    except Exception as e:
+        logger.error(f"sector_rotation API 失敗: {e}")
+        return JSONResponse(status_code=500, content={"error": str(e)})
+
 
 
 @app.post("/run/daily")
