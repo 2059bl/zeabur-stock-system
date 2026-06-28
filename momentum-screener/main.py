@@ -15,7 +15,8 @@ from contextlib import asynccontextmanager
 from typing import Optional
 
 from fastapi import FastAPI, BackgroundTasks, Query
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
@@ -625,6 +626,13 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="尾盤動量篩選系統", version="1.0.0", lifespan=lifespan)
 
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["GET"],
+    allow_headers=["*"],
+)
+
 
 # ── Models ────────────────────────────────────────────────────────────────────
 
@@ -653,6 +661,19 @@ async def health():
         "schedule": f"{SCHEDULE_HOUR:02d}:{SCHEDULE_MINUTE:02d} {SCHEDULE_TZ}",
         "tracking": stocks[0]["n"] if stocks else 0,
     }
+
+
+@app.get("/api/sector-rotation")
+async def sector_rotation(trade_date: Optional[str] = Query(None, description="YYYY-MM-DD，預設今天")):
+    """板塊輪動即時資料，供 tw-sector-rotation-map.html 拉取。"""
+    from utils.sector_rotation import build_sector_rotation
+    try:
+        data = await build_sector_rotation(today=trade_date)
+        return JSONResponse(content=data)
+    except Exception as e:
+        logger.error(f"sector_rotation 失敗: {e}")
+        return JSONResponse(status_code=500, content={"error": str(e)})
+
 
 
 @app.get("/stocks")
