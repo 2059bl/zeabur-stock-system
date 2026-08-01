@@ -7,7 +7,7 @@ import logging
 
 logger = logging.getLogger(__name__)
 
-_pool: asyncpg.Pool | None = None
+_pool = None
 
 DATABASE_URL = os.environ.get(
     "DATABASE_URL",

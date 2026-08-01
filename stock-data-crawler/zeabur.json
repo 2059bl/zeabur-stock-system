@@ -1,0 +1,33 @@
+{
+  "build": {
+    "builder": "docker"
+  },
+  "service": {
+    "python": {
+      "version": "3.11"
+    }
+  },
+  "env": {
+    "FINMIND_TOKEN": {
+      "description": "FinMind API Token",
+      "default": "",
+      "type": "string"
+    },
+    "TEJ_API_KEY": {
+      "description": "TEJ API Key",
+      "default": "",
+      "type": "string"
+    },
+    "DATABASE_URL": {
+      "description": "PostgreSQL 連接字串",
+      "default": "postgresql://user:password@db:5432/stock_data",
+      "type": "string"
+    }
+  },
+  "healthcheck": {
+    "path": "/health",
+    "interval": 30,
+    "timeout": 10,
+    "unhealthy_threshold": 3
+  }
+}

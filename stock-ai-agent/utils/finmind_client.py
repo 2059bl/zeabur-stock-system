@@ -66,7 +66,17 @@ async def fetch_institutional(stock_code: str, trade_date: str) -> Optional[dict
     for row in rows:
         if row.get("date") != trade_date:
             continue
-        key = name_map.get(row.get("name", ""))
+        # 使用名稱映射查找，若找不到再嘗試區分大小寫的關鍵字比對
+        row_name = row.get("name", "")
+        key = name_map.get(row_name)
+        if not key:
+            if "外資" in row_name or "Foreign" in row_name:
+                key = "foreign_net_buy"
+            elif "投信" in row_name or "Investment" in row_name:
+                key = "investment_trust_net_buy"
+            elif "自營" in row_name or "Dealer" in row_name:
+                key = "dealer_net_buy"
+        
         if key:
             result[key] = result.get(key, 0) + int(row.get("buy") or 0) - int(row.get("sell") or 0)
             found = True
