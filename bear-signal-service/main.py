@@ -70,6 +70,26 @@ ALTER TABLE bear_market_indicators ADD COLUMN IF NOT EXISTS news_summary TEXT;
 ALTER TABLE bear_market_indicators ADD COLUMN IF NOT EXISTS news_risk_level VARCHAR(10);
 ALTER TABLE bear_market_indicators ADD COLUMN IF NOT EXISTS news_black_swan TEXT;
 ALTER TABLE bear_market_indicators ADD COLUMN IF NOT EXISTS news_key_risks TEXT;
+
+-- 黑天鵝/灰犀牛事件日誌表（P2.1 新增）
+CREATE TABLE IF NOT EXISTS news_events (
+    id               BIGSERIAL PRIMARY KEY,
+    event_date       DATE NOT NULL,
+    event_type       VARCHAR(20) NOT NULL,  -- 'BLACK_SWAN' or 'GRAY_RHINO'
+    category         VARCHAR(50),            -- 'geopolitical', 'pandemic', 'recession' 等
+    headline         TEXT NOT NULL,
+    source           VARCHAR(50),            -- 新聞來源 (Reuters, BBC, etc.)
+    keywords         TEXT,                   -- 觸發的關鍵字
+    risk_level       VARCHAR(10),            -- 'HIGH', 'MEDIUM', 'LOW'
+    impact_score     NUMERIC(5,1),           -- 預估市場衝擊分數 0-100
+    is_resolved      BOOLEAN DEFAULT FALSE,  -- 事件是否已平復
+    resolved_date    DATE,
+    notes            TEXT,
+    created_at       TIMESTAMPTZ DEFAULT NOW(),
+    UNIQUE (event_date, headline)
+);
+CREATE INDEX IF NOT EXISTS idx_news_events_type_date ON news_events (event_type, event_date DESC);
+CREATE INDEX IF NOT EXISTS idx_news_events_resolved ON news_events (is_resolved, event_date DESC);
 """
 
 

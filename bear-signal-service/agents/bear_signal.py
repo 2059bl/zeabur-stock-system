@@ -199,6 +199,8 @@ async def _d8_industry_rotation() -> dict:
 async def compute_bear_signal() -> dict:
     """計算完整 8 維空頭信號，回傳評分與等級。"""
     today = str(datetime.date.today())
+    today_dt = datetime.date.fromisoformat(today)
+    is_weekend = today_dt.weekday() >= 5  # 0=Mon, 5=Sat, 6=Sun
 
     # 並行抓取所有資料
     (inst_db, futures, usdtwd, margin, index_t, rotation, news) = await asyncio.gather(
@@ -245,6 +247,12 @@ async def compute_bear_signal() -> dict:
     elif short_ratio >= 4:  d6 = 20
     else:                   d6 = 0
 
+    # D9 週末降權：週末新聞較少，信號可信度下降，降權 50%
+    d9_news_score = news["d9_score"]
+    if is_weekend:
+        d9_news_score = round(d9_news_score * 0.5, 1)
+        logger.info(f"[D9] Weekend discount applied: {news['d9_score']} → {d9_news_score}")
+
     scores = {
         "D1_外資現貨":   inst_db["d1_score"],
         "D2_投信現貨":   inst_db["d2_score"],
@@ -254,7 +262,7 @@ async def compute_bear_signal() -> dict:
         "D6_融券增加":   round(d6, 1),
         "D7_大盤走勢":   index_t["d7_score"],
         "D8_產業輪動":   rotation["d8_score"],
-        "D9_新聞情緒":   news["d9_score"],
+        "D9_新聞情緒":   d9_news_score,
     }
     total = round(sum(scores.values()) / len(scores), 1)
     level, action = _level(total)
@@ -296,11 +304,35 @@ async def compute_bear_signal() -> dict:
 
 
 async def save_signal(result: dict):
-    """將信號結果寫入 bear_market_indicators 表。"""
+    """將信號結果寫入 bear_market_indicators 表，並記錄黑天鵝/灰犀牛事件。"""
     sig_date = (datetime.date.fromisoformat(result["date"])
                 if isinstance(result["date"], str) else result["date"])
     black_swan_text  = "; ".join(result.get("news_black_swan", []))[:500] or None
     key_risks_text   = "; ".join(result.get("news_key_risks", []))[:500] or None
+
+    # P2.1：記錄黑天鵝事件到 news_events 表
+    black_swan_events = result.get("news_black_swan", [])
+    for event_text in black_swan_events:
+        try:
+            await execute("""
+                INSERT INTO news_events (event_date, event_type, headline, risk_level, impact_score)
+                VALUES ($1, 'BLACK_SWAN', $2, 'HIGH', $3)
+                ON CONFLICT (event_date, headline) DO NOTHING
+            """, sig_date, event_text, 80)
+        except Exception as e:
+            logger.warning(f"Failed to save black swan event: {e}")
+
+    # 記錄灰犀牛事件到 news_events 表
+    gray_rhino_events = result.get("news_gray_rhino", [])
+    for event_text in gray_rhino_events:
+        try:
+            await execute("""
+                INSERT INTO news_events (event_date, event_type, headline, risk_level, impact_score)
+                VALUES ($1, 'GRAY_RHINO', $2, 'MEDIUM', $3)
+                ON CONFLICT (event_date, headline) DO NOTHING
+            """, sig_date, event_text, 50)
+        except Exception as e:
+            logger.warning(f"Failed to save gray rhino event: {e}")
     await execute("""
         INSERT INTO bear_market_indicators
             (signal_date, total_score, signal_level,

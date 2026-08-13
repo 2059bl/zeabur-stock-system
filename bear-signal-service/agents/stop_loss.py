@@ -47,13 +47,25 @@ async def _get_screened_positions() -> list[dict]:
 async def _get_latest_and_recent_prices(stock_codes: list[str]) -> dict[str, dict]:
     """
     用 FinMind TaiwanStockPrice 取最新及近 5 日收盤價。
-    限制並發 10 檔避免 rate limit。
+    動態批次大小：根據持倉數調整，避免 rate limit。
     """
     if not stock_codes:
         return {}
 
     result: dict[str, dict] = {}
-    batch = stock_codes[:15]
+    # 動態批次計算：0-10檔用10，11-20檔用8，21-30檔用6，30+檔用5
+    total_codes = len(stock_codes)
+    if total_codes <= 10:
+        batch_size = 10
+    elif total_codes <= 20:
+        batch_size = 8
+    elif total_codes <= 30:
+        batch_size = 6
+    else:
+        batch_size = 5
+
+    batch = stock_codes[:batch_size]
+    logger.info(f"[StopLoss] Dynamic batch: {total_codes} codes → batch_size={batch_size}")
     tasks = [finmind_get("TaiwanStockPrice", code, days=10) for code in batch]
     responses = await asyncio.gather(*tasks, return_exceptions=True)
 
