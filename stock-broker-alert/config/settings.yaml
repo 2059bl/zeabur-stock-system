@@ -1,0 +1,47 @@
+# 系統設定
+finmind:
+  daily_limit: 8000          # 每日 API 上限
+  safe_threshold: 7000       # 超過此數停止擴張式抓取
+  concurrency: 5             # 並發請求數
+  broker_concurrency: 3      # 分點資料並發（資料量大）
+  retry_max: 3               # 最大重試次數
+  timeout: 20                # 請求超時秒數
+
+tej:
+  daily_limit: 5000
+  safe_threshold: 4500
+
+# 暴跌日條件
+crash_threshold:
+  taiex_drop_pct: -2.0       # 大盤跌幅閾值（%），觸發全面掃描
+  stock_drop_pct: -4.0       # 個股跌幅閾值，納入分析
+  volume_ratio_min: 1.5      # 成交量倍數（vs 20日均量），強調放量
+
+# 分點承接評分閾值
+absorption:
+  high_ratio_pct: 15.0       # 🔥 高吞噬率閾值
+  alert_ratio_pct: 3.0       # ⚠️ 異常大買閾值（占成交量%）
+  alert_amount_ntd: 50000000 # ⚠️ 異常大買金額閾值（元）
+  consecutive_days: 3        # 連續買超天數觸發警報
+
+# Broker Score 閾值
+broker_score:
+  blood_absorption: 20       # 暴跌日承接加分
+  high_absorption: 20        # 吞噬率 >= 15% 加分
+  consecutive_days: 20       # 連續多日承接加分
+  multi_sector: 15           # 同族群多檔承接加分
+  inst_sync: 15              # 法人同步買超加分
+  day_trade_penalty: -20     # 高頻隔日沖扣分
+  watchlist_threshold: 50    # 進入 watchlist 的最低分數
+
+# 排程設定（台灣時間）
+scheduler:
+  daily_analysis: "22:30"    # 每日收盤後分析
+  cleanup: "01:00"           # 凌晨清理
+  day_trade_check: "09:30"   # 開盤前隔日沖風險提醒
+
+# 分析範圍
+analysis:
+  max_stocks_per_run: 60     # 每次最多分析股票數
+  lookback_days: 20          # 隔日沖分析回溯天數
+  top_brokers: 10            # 取買超前 N 大分點
