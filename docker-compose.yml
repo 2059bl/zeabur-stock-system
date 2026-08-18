@@ -13,6 +13,18 @@ services:
       - pg_data:/var/lib/postgresql/data
       - ./db/init.sql:/docker-entrypoint-initdb.d/init.sql
 
+  stock-broker-alert:
+    build: ./stock-broker-alert
+    ports:
+      - "8001:8000"
+    environment:
+      DATABASE_URL: ${DATABASE_URL:-postgresql://postgres:password@postgresql:5432/quant_db}
+      FINMIND_TOKEN: ${FINMIND_TOKEN:-}
+      TEJ_API_KEY: ${TEJ_API_KEY:-}
+      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:-}
+      TELEGRAM_CHAT_ID: ${TELEGRAM_CHAT_ID:-}
+    restart: unless-stopped
+
   stock-ai-agent:
     build: ./stock-ai-agent
     ports:
