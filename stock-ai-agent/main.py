@@ -19,11 +19,13 @@ from agents.decision_agent import run_cloud_decision
 from agents.news_agent import run_news_sentiment, get_recent_news
 from agents.scoring_agent import update_composite_scores
 from agents.momentum_agent import run_momentum_screening, calculate_momentum_returns, CFG as MOMENTUM_CFG
+from agents.crash_agent import analyze_crash_day, build_crash_telegram_msg
 from utils.signals import compute_market_bear_signal
 from utils.sector_rotation import build_sector_rotation
 from utils.notifier import send_telegram, get_chat_id
 from utils.chatbot import send_message, chat_with_llm, set_webhook
 from utils.db import execute, fetch_all, get_pool
+from utils.finmind_client import FINMIND_TOKEN
 
 logging.basicConfig(
     level=logging.INFO,
@@ -38,33 +40,49 @@ CONCURRENCY     = int(os.environ.get("PIPELINE_CONCURRENCY", "8"))
 
 scheduler = AsyncIOScheduler(timezone=SCHEDULE_TZ)
 
+# ── 防崩潰常數 ──────────────────────────────────────────────────────────────────
+# 並發降至 5（原 8），避免同時打爆 FinMind
+CONCURRENCY = int(os.environ.get("PIPELINE_CONCURRENCY", "5"))
+# 大盤跌幅觸發暴跌分析閾值
+CRASH_THRESHOLD = float(os.environ.get("CRASH_THRESHOLD", "-2.0"))
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     await get_pool()
-    # 每日 22:00 主流程（報價→指標→籌碼→情緒→評分→AI）
+
+    # ── 排程（錯開時間，避免 22:00 同時打爆 API）──────────────────────────────
+    # 22:00  資料主流程（報價→指標→籌碼→評分）
     scheduler.add_job(
         _scheduled_daily_run,
         CronTrigger(hour=SCHEDULE_HOUR, minute=SCHEDULE_MINUTE, timezone=SCHEDULE_TZ),
-        id="daily_pipeline",
-        replace_existing=True,
+        id="daily_pipeline", replace_existing=True,
     )
-    # 每日 22:10 動量篩選（主流程完成後）
+    # 22:20  動量篩選（資料主流程完成後，+20min 確保不衝突）
     scheduler.add_job(
         _scheduled_momentum_run,
-        CronTrigger(hour=SCHEDULE_HOUR, minute=SCHEDULE_MINUTE + 10, timezone=SCHEDULE_TZ),
-        id="momentum_pipeline",
-        replace_existing=True,
+        CronTrigger(hour=SCHEDULE_HOUR, minute=SCHEDULE_MINUTE + 20, timezone=SCHEDULE_TZ),
+        id="momentum_pipeline", replace_existing=True,
     )
-    # 每日 22:20 回算前一日動量報酬率
+    # 22:35  回算前一日動量報酬率（+35min）
     scheduler.add_job(
         _scheduled_return_calc,
-        CronTrigger(hour=SCHEDULE_HOUR, minute=SCHEDULE_MINUTE + 20, timezone=SCHEDULE_TZ),
-        id="return_calc",
-        replace_existing=True,
+        CronTrigger(hour=SCHEDULE_HOUR, minute=SCHEDULE_MINUTE + 35, timezone=SCHEDULE_TZ),
+        id="return_calc", replace_existing=True,
     )
+    # 每日 01:00  清理舊資料（broker_daily 30天、gov_bank 90天）
+    scheduler.add_job(
+        _scheduled_cleanup,
+        CronTrigger(hour=1, minute=0, timezone=SCHEDULE_TZ),
+        id="daily_cleanup", replace_existing=True,
+    )
+
     scheduler.start()
-    logger.info(f"排程啟動：主流程 {SCHEDULE_HOUR:02d}:{SCHEDULE_MINUTE:02d} / 動量 +10min / 報酬回算 +20min")
+    logger.info(
+        f"排程啟動："
+        f"主流程 {SCHEDULE_HOUR:02d}:{SCHEDULE_MINUTE:02d} | "
+        f"動量 +20min | 回算 +35min | 清理 01:00"
+    )
     yield
     scheduler.shutdown(wait=False)
 
@@ -260,6 +278,57 @@ async def latest_reports():
 async def stock_news(stock_code: str, days: int = Query(7, le=30)):
     """查詢個股最近新聞與情緒分數。"""
     return await get_recent_news(stock_code, days)
+
+
+@app.get("/crash-absorption")
+async def crash_absorption(
+    date: Optional[str] = Query(None, description="YYYY-MM-DD，預設最近一筆"),
+    min_score: float = Query(4.5, description="最低承接評分"),
+):
+    """暴跌日帶血籌碼承接分析結果查詢。"""
+    if date:
+        rows = await fetch_all("""
+            SELECT * FROM crash_absorption_events
+            WHERE crash_date = $1 AND absorption_score >= $2
+            ORDER BY absorption_score DESC
+        """, _date.fromisoformat(date), min_score)
+    else:
+        rows = await fetch_all("""
+            SELECT * FROM crash_absorption_events
+            WHERE absorption_score >= $1
+            ORDER BY crash_date DESC, absorption_score DESC
+            LIMIT 30
+        """, min_score)
+    return {"count": len(rows), "results": rows}
+
+
+@app.post("/crash-absorption/run")
+async def run_crash_analysis(
+    trade_date: str = Query(..., description="YYYY-MM-DD"),
+    background_tasks: BackgroundTasks = None,
+):
+    """手動觸發暴跌日承接分析（不受大盤跌幅閾值限制）。"""
+    async def _run():
+        results = await analyze_crash_day(trade_date, FINMIND_TOKEN, taiex_drop=-3.0)
+        if results:
+            msg = build_crash_telegram_msg(results, trade_date, -3.0)
+            await send_telegram(msg)
+    background_tasks.add_task(_run)
+    return {"status": "started", "trade_date": trade_date}
+
+
+@app.get("/api-usage")
+async def api_usage():
+    """查詢今日 API 呼叫用量（防崩潰監控）。"""
+    from utils.rate_limiter import get_today_count, DAILY_LIMIT
+    count = get_today_count("finmind")
+    return {
+        "date": str(date.today()),
+        "finmind_calls": count,
+        "daily_limit": DAILY_LIMIT,
+        "usage_pct": round(count / DAILY_LIMIT * 100, 1),
+        "status": "⚠ 接近上限" if count > DAILY_LIMIT * 0.8 else "✅ 正常",
+    }
 
 
 @app.post("/backtest")
@@ -917,6 +986,15 @@ async def _scheduled_return_calc():
     await calculate_momentum_returns(yesterday)
 
 
+async def _scheduled_cleanup():
+    """每日 01:00 清理舊資料（防磁碟撐爆）。"""
+    try:
+        await execute("SELECT cleanup_old_data()")
+        logger.info("[清理] 舊資料清理完成（broker_daily 30天、gov_bank 90天、api_usage 30天）")
+    except Exception as e:
+        logger.warning(f"[清理] 失敗: {e}")
+
+
 async def _momentum_worker(trade_date: str):
     """動量篩選背景 worker：篩選 → 推播 Telegram。"""
     try:
@@ -959,8 +1037,9 @@ async def _pipeline_worker(trade_date: str):
         stocks = await fetch_all(
             "SELECT stock_code, market FROM stocks WHERE is_active = TRUE"
         )
-        sem      = asyncio.Semaphore(CONCURRENCY)
-        chip_sem = asyncio.Semaphore(4)
+        # 防崩潰：統一降低並發（原 8→5，chip 4→3）
+        sem      = asyncio.Semaphore(CONCURRENCY)     # = 5
+        chip_sem = asyncio.Semaphore(3)
         llm_sem  = asyncio.Semaphore(3)
         news_sem = asyncio.Semaphore(5)
 
@@ -1022,6 +1101,19 @@ async def _pipeline_worker(trade_date: str):
 
         # ── Step 8: 大盤信號（含期貨）──────────────────────────────────────
         mkt = await compute_market_bear_signal(trade_date)
+
+        # ── Step 9b: 暴跌日承接分析（條件觸發，不是每天都跑）───────────────
+        taiex_row = await fetch_all(
+            "SELECT change_pct FROM market_indicators WHERE trade_date = $1 LIMIT 1",
+            _date.fromisoformat(trade_date),
+        )
+        taiex_drop = float(taiex_row[0]["change_pct"]) if taiex_row else 0.0
+        if taiex_drop <= CRASH_THRESHOLD:
+            logger.info(f"[暴跌日] 大盤跌 {taiex_drop:.1f}%，啟動帶血籌碼承接分析")
+            crash_results = await analyze_crash_day(trade_date, FINMIND_TOKEN, taiex_drop)
+            if crash_results:
+                crash_msg = build_crash_telegram_msg(crash_results, trade_date, taiex_drop)
+                await send_telegram(crash_msg)
 
         # ── Step 9: Telegram 推播 ────────────────────────────────────────────
         candidate_block = (

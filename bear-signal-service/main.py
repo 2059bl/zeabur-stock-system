@@ -193,18 +193,20 @@ async def lifespan(app: FastAPI):
         await conn.execute(_SCHEMA_SQL)
     logger.info("DB Schema 初始化完成")
 
+    # 22:45 主信號（stock-ai-agent 22:35 結束後才跑，避免同時打 API）
     scheduler.add_job(
         _run_daily_signal,
-        CronTrigger(hour=22, minute=30, timezone="Asia/Taipei"),
+        CronTrigger(hour=22, minute=45, timezone="Asia/Taipei"),
         id="daily_bear_signal", replace_existing=True,
     )
+    # 15:30 停損預警（移至盤後 15:30，避免盤中 14:30 資料不完整）
     scheduler.add_job(
         _run_stop_loss_check,
-        CronTrigger(hour=14, minute=30, timezone="Asia/Taipei"),
+        CronTrigger(hour=15, minute=30, timezone="Asia/Taipei"),
         id="daily_stop_loss", replace_existing=True,
     )
     scheduler.start()
-    logger.info("排程啟動：22:30 主信號 / 14:30 停損預警")
+    logger.info("排程啟動：22:45 主信號（等 stock-ai-agent 完成）/ 15:30 停損預警")
     yield
     scheduler.shutdown(wait=False)
 
