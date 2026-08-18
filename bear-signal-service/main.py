@@ -70,6 +70,47 @@ ALTER TABLE bear_market_indicators ADD COLUMN IF NOT EXISTS news_summary TEXT;
 ALTER TABLE bear_market_indicators ADD COLUMN IF NOT EXISTS news_risk_level VARCHAR(10);
 ALTER TABLE bear_market_indicators ADD COLUMN IF NOT EXISTS news_black_swan TEXT;
 ALTER TABLE bear_market_indicators ADD COLUMN IF NOT EXISTS news_key_risks TEXT;
+
+-- 黑天鵝/灰犀牛事件日誌表（P2.1 新增）
+CREATE TABLE IF NOT EXISTS news_events (
+    id               BIGSERIAL PRIMARY KEY,
+    event_date       DATE NOT NULL,
+    event_type       VARCHAR(20) NOT NULL,  -- 'BLACK_SWAN' or 'GRAY_RHINO'
+    category         VARCHAR(50),            -- 'geopolitical', 'pandemic', 'recession' 等
+    headline         TEXT NOT NULL,
+    source           VARCHAR(50),            -- 新聞來源 (Reuters, BBC, etc.)
+    keywords         TEXT,                   -- 觸發的關鍵字
+    risk_level       VARCHAR(10),            -- 'HIGH', 'MEDIUM', 'LOW'
+    impact_score     NUMERIC(5,1),           -- 預估市場衝擊分數 0-100
+    is_resolved      BOOLEAN DEFAULT FALSE,  -- 事件是否已平復
+    resolved_date    DATE,
+    notes            TEXT,
+    created_at       TIMESTAMPTZ DEFAULT NOW(),
+    UNIQUE (event_date, headline)
+);
+CREATE INDEX IF NOT EXISTS idx_news_events_type_date ON news_events (event_type, event_date DESC);
+CREATE INDEX IF NOT EXISTS idx_news_events_resolved ON news_events (is_resolved, event_date DESC);
+
+-- 視圖：事件與信號的關聯分析（P2.1 新增）
+CREATE OR REPLACE VIEW news_event_signals AS
+SELECT
+    e.event_date,
+    e.event_type,
+    e.headline,
+    e.risk_level,
+    e.impact_score,
+    b.total_score,
+    b.signal_level,
+    b.d9_news,
+    CASE
+        WHEN e.event_date = b.signal_date THEN 'SAME_DAY'
+        WHEN e.event_date < b.signal_date AND b.signal_date - e.event_date <= 3 THEN 'WITHIN_3D'
+        ELSE 'PRIOR'
+    END as event_signal_gap,
+    e.is_resolved
+FROM news_events e
+LEFT JOIN bear_market_indicators b ON b.signal_date >= e.event_date AND b.signal_date <= e.event_date + INTERVAL '3 days'
+ORDER BY e.event_date DESC, e.impact_score DESC;
 """
 
 
@@ -318,6 +359,42 @@ async def signal_history(limit: int = 30):
         FROM bear_market_indicators
         ORDER BY signal_date DESC LIMIT $1
     """, limit)
+
+
+@app.get("/events/latest")
+async def latest_events(limit: int = 20, event_type: str = None):
+    """查詢最新的黑天鵝/灰犀牛事件（P2.1 新增）。
+
+    Args:
+        limit: 返回數量（預設 20）
+        event_type: 事件類型篩選 ('BLACK_SWAN' 或 'GRAY_RHINO')，空值則返回全部
+    """
+    if event_type:
+        rows = await fetch_all("""
+            SELECT * FROM news_events
+            WHERE event_type = $1
+            ORDER BY event_date DESC LIMIT $2
+        """, event_type, limit)
+    else:
+        rows = await fetch_all("""
+            SELECT * FROM news_events
+            ORDER BY event_date DESC LIMIT $1
+        """, limit)
+    return {"events": rows, "count": len(rows)}
+
+
+@app.get("/events/signals")
+async def event_signal_analysis(days: int = 7):
+    """查詢事件與信號的關聯分析（P2.1 新增視圖）。
+
+    顯示最近 N 天內發生的事件，以及相關時期的空頭信號。
+    """
+    rows = await fetch_all("""
+        SELECT * FROM news_event_signals
+        WHERE event_date >= NOW()::date - $1::interval
+        ORDER BY event_date DESC
+    """, f"{days} days")
+    return {"correlations": rows, "period_days": days}
 
 
 @app.get("/dashboard", response_class=HTMLResponse)

@@ -21,6 +21,7 @@ from agents.screener import run_screening, save_results
 from utils.db import get_pool, fetch_all, execute
 from utils.notifier import send
 from utils.price import fetch_ohlcv
+from utils.three_rate import analyze_stock, to_markdown
 
 logging.basicConfig(
     level=logging.INFO,
@@ -617,6 +618,56 @@ async def get_results(
         sql = sql.replace("{pool_filter}", "").replace("{pool_sub}", "")
 
     return await fetch_all(sql, *args)
+
+
+@app.get("/three-rate")
+async def three_rate_screen(
+    codes: str = Query("", description="逗號分隔股票代號；空白 = 讀 DB 所有啟用股票"),
+    min_rise: int = Query(2, ge=1, le=3, description="三率最少幾率上升才顯示（預設2）"),
+    fmt: str = Query("json", description="輸出格式：json 或 md"),
+):
+    """
+    三率三升財務推估
+    - 計算毛利率/營業利益率/淨利率 YoY 變化
+    - 推估全年 EPS（H1實際 + H2依YoY估算）
+    - 市場動能評分（0-10）
+    - ?fmt=md 回傳 Markdown 表格
+    """
+    if codes.strip():
+        stock_list = [c.strip() for c in codes.split(",") if c.strip()]
+        stock_dict = {c: c for c in stock_list}
+    else:
+        rows = await fetch_all("""
+            SELECT DISTINCT ps.stock_code, s.stock_name
+            FROM screener_pool_stocks ps
+            JOIN screener_stocks s ON s.stock_code = ps.stock_code
+            WHERE ps.is_active = TRUE
+            ORDER BY ps.stock_code
+        """)
+        stock_dict = {r["stock_code"]: r["stock_name"] for r in rows}
+
+    results = []
+    loop = asyncio.get_event_loop()
+    for code, name in stock_dict.items():
+        try:
+            r = await loop.run_in_executor(None, analyze_stock, code, name)
+            if r and r.get("rise_count", 0) >= min_rise:
+                results.append(r)
+        except Exception as e:
+            logger.warning(f"三率分析失敗 {code}: {e}")
+
+    results.sort(key=lambda x: x.get("eps_growth_pct") or -999, reverse=True)
+
+    if fmt == "md":
+        from fastapi.responses import PlainTextResponse
+        return PlainTextResponse(to_markdown(results), media_type="text/plain; charset=utf-8")
+
+    return {
+        "count": len(results),
+        "min_rise_filter": min_rise,
+        "generated_at": datetime.datetime.now(datetime.timezone(datetime.timedelta(hours=8))).isoformat(),
+        "results": results,
+    }
 
 
 @app.get("/logs")
