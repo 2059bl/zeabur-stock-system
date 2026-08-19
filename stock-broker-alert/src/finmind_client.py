@@ -15,18 +15,33 @@ from src.db import execute, fetch_one
 
 logger = logging.getLogger(__name__)
 
-FINMIND_TOKEN = os.environ["FINMIND_TOKEN"]
+FINMIND_TOKEN = os.environ.get("FINMIND_TOKEN", "")
 FM_BASE = "https://api.finmindtrade.com/api/v4/data"
 
-DAILY_LIMIT   = int(os.environ.get("FINMIND_DAILY_LIMIT", "8000"))
-SAFE_THRESHOLD = int(os.environ.get("FINMIND_SAFE_THRESHOLD", "7000"))
-CONCURRENCY   = int(os.environ.get("FINMIND_CONCURRENCY", "5"))
+DAILY_LIMIT        = int(os.environ.get("FINMIND_DAILY_LIMIT", "8000"))
+SAFE_THRESHOLD     = int(os.environ.get("FINMIND_SAFE_THRESHOLD", "7000"))
+CONCURRENCY        = int(os.environ.get("FINMIND_CONCURRENCY", "5"))
 BROKER_CONCURRENCY = int(os.environ.get("BROKER_CONCURRENCY", "3"))
-RETRY_MAX     = int(os.environ.get("FINMIND_RETRY_MAX", "3"))
-TIMEOUT       = int(os.environ.get("FINMIND_TIMEOUT", "20"))
+RETRY_MAX          = int(os.environ.get("FINMIND_RETRY_MAX", "3"))
+TIMEOUT            = int(os.environ.get("FINMIND_TIMEOUT", "20"))
 
-_sem        = asyncio.Semaphore(CONCURRENCY)
-_broker_sem = asyncio.Semaphore(BROKER_CONCURRENCY)
+# 懶初始化：asyncio.Semaphore 必須在 event loop 內建立（Python 3.10+）
+_sem: Optional[asyncio.Semaphore] = None
+_broker_sem: Optional[asyncio.Semaphore] = None
+
+
+def _get_sem() -> asyncio.Semaphore:
+    global _sem
+    if _sem is None:
+        _sem = asyncio.Semaphore(CONCURRENCY)
+    return _sem
+
+
+def _get_broker_sem() -> asyncio.Semaphore:
+    global _broker_sem
+    if _broker_sem is None:
+        _broker_sem = asyncio.Semaphore(BROKER_CONCURRENCY)
+    return _broker_sem
 
 # 進程內計數（快速檢查，DB 為持久化）
 _proc_count: dict[str, int] = {}
@@ -108,7 +123,7 @@ async def fm_get(
         logger.error("⛔ FinMind 今日已達上限，停止請求")
         return []
 
-    sem = _broker_sem if use_broker_sem else _sem
+    sem = _get_broker_sem() if use_broker_sem else _get_sem()
 
     params: dict = {
         "dataset": dataset,
