@@ -43,14 +43,14 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(
-    title="Stock Broker Alert",
-    description="暴跌日帶血籌碼承接分析 + 關鍵券商分點追蹤警報",
+    title="主力帶血承接警報系統",
+    description="暴跌日帶血籌碼承接分析 ＋ 關鍵券商分點追蹤警報",
     version="1.0.0",
     lifespan=lifespan,
 )
 
 
-@app.get("/health")
+@app.get("/health", summary="服務健康狀態")
 async def health():
     from src.finmind_client import get_today_count
     return {
@@ -62,11 +62,11 @@ async def health():
 
 
 # ── 手動觸發分析（歷史日期 or 今日）──────────────────────────────────────────────
-@app.post("/analyze/blood-day")
+@app.post("/analyze/blood-day", summary="觸發帶血日分析")
 async def trigger_blood_analysis(
     trade_date: str = Query(..., description="分析日期 YYYY-MM-DD"),
-    drop_threshold: float = Query(-4.0),
-    max_stocks: int = Query(60),
+    drop_threshold: float = Query(-4.0, description="大盤跌幅門檻（%，預設 -4.0）"),
+    max_stocks: int = Query(60, description="最多分析股票數"),
 ):
     """手動觸發暴跌日帶血籌碼承接分析。"""
     from src.blood_absorption import analyze_blood_day
@@ -91,10 +91,10 @@ async def trigger_blood_analysis(
     }
 
 
-@app.get("/blood-day/report")
+@app.get("/blood-day/report", summary="帶血承接分析報告")
 async def get_blood_report(
-    trade_date: str = Query(...),
-    signal: str = Query("", description="STRONG_BUY / WATCH / AVOID / 空=全部"),
+    trade_date: str = Query(..., description="交易日 YYYY-MM-DD"),
+    signal: str = Query("", description="信號篩選：STRONG_BUY / WATCH / AVOID / 空=全部"),
 ):
     """查詢指定日期的帶血承接分析結果。"""
     from src.db import fetch_all
@@ -109,9 +109,9 @@ async def get_blood_report(
     return {"trade_date": trade_date, "count": len(rows), "data": rows}
 
 
-@app.get("/blood-day/report/markdown", response_class=PlainTextResponse)
-async def get_blood_report_md(trade_date: str = Query(...)):
-    """暴跌日籌碼轉移總表（Markdown）。"""
+@app.get("/blood-day/report/markdown", summary="帶血承接報告（Markdown 格式）", response_class=PlainTextResponse)
+async def get_blood_report_md(trade_date: str = Query(..., description="交易日 YYYY-MM-DD")):
+    """暴跌日籌碼轉移總表（Markdown 純文字，適合複製到通訊軟體）。"""
     from src.db import fetch_all
     rows = await fetch_all(
         """SELECT trade_date, stock_code, stock_name, sector,
@@ -158,8 +158,8 @@ async def get_blood_report_md(trade_date: str = Query(...)):
 
 
 # ── Broker Watchlist ──────────────────────────────────────────────────────────
-@app.get("/watchlist")
-async def get_watchlist(active_only: bool = Query(True)):
+@app.get("/watchlist", summary="主力券商觀察名單")
+async def get_watchlist(active_only: bool = Query(True, description="True=僅顯示啟用中的券商")):
     from src.db import fetch_all
     cond = "WHERE active=TRUE" if active_only else ""
     rows = await fetch_all(
@@ -168,7 +168,7 @@ async def get_watchlist(active_only: bool = Query(True)):
     return {"count": len(rows), "data": rows}
 
 
-@app.post("/watchlist/rebuild")
+@app.post("/watchlist/rebuild", summary="重建主力券商觀察名單")
 async def rebuild_watchlist():
     """從歷史分析結果重建 Watchlist。"""
     from src.broker_score import rebuild_watchlist_from_history
@@ -203,7 +203,7 @@ async def eps_analysis(
 
 
 # ── Broker Top 20 排行榜 ──────────────────────────────────────────────────────
-@app.get("/broker/top20")
+@app.get("/broker/top20", summary="主力券商評分排行 Top 20")
 async def broker_top20():
     from src.db import fetch_all
     rows = await fetch_all(
@@ -228,7 +228,7 @@ async def broker_top20():
 
 
 # ── API Quota 查詢 ────────────────────────────────────────────────────────────
-@app.get("/api-quota")
+@app.get("/api-quota", summary="FinMind API 用量查詢")
 async def api_quota():
     from src.finmind_client import get_today_count
     from src.db import fetch_all
@@ -242,10 +242,10 @@ async def api_quota():
 
 
 # ── 警報記錄 ──────────────────────────────────────────────────────────────────
-@app.get("/alerts")
+@app.get("/alerts", summary="券商警報記錄")
 async def get_alerts(
-    days: int = Query(7, description="最近幾天"),
-    broker_code: str = Query(""),
+    days: int = Query(7, description="查詢最近幾天（預設 7 天）"),
+    broker_code: str = Query("", description="券商代碼篩選（空=全部）"),
 ):
     from src.db import fetch_all
     from datetime import timedelta
@@ -260,7 +260,7 @@ async def get_alerts(
 
 
 # ── 手動執行今日警報掃描 ───────────────────────────────────────────────────────
-@app.post("/alerts/run")
+@app.post("/alerts/run", summary="立即執行今日警報掃描")
 async def run_alerts_now():
     from src.alert_engine import run_daily_alerts
     today = str(date.today())

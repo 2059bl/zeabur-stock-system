@@ -15,7 +15,7 @@ import logging
 import datetime
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Query
 from fastapi.responses import HTMLResponse
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
@@ -211,10 +211,15 @@ async def lifespan(app: FastAPI):
     scheduler.shutdown(wait=False)
 
 
-app = FastAPI(title="Bear Signal Service", version=VERSION, lifespan=lifespan)
+app = FastAPI(
+    title="空頭信號服務",
+    description="外資離場 9 維空頭信號 ＋ 產業輪動警示 ＋ 新聞情緒掃描 ＋ 停損預警",
+    version=VERSION,
+    lifespan=lifespan,
+)
 
 
-@app.get("/health")
+@app.get("/health", summary="服務健康狀態")
 async def health():
     return {
         "status":  "ok",
@@ -223,30 +228,30 @@ async def health():
     }
 
 
-@app.post("/run/signal")
+@app.post("/run/signal", summary="立即觸發空頭信號計算")
 async def manual_signal():
-    """手動觸發信號計算（背景執行）。"""
+    """手動觸發 9 維空頭信號計算（背景執行，不等待完成）。"""
     asyncio.create_task(_run_daily_signal())
     return {"status": "triggered", "date": str(datetime.date.today())}
 
 
-@app.post("/run/stop-loss")
+@app.post("/run/stop-loss", summary="立即執行停損預警掃描")
 async def manual_stop_loss():
-    """手動觸發停損預警掃描。"""
+    """手動觸發停損預警掃描（背景執行）。"""
     asyncio.create_task(_run_stop_loss_check())
     return {"status": "triggered", "date": str(datetime.date.today())}
 
 
-@app.get("/alerts/stop-loss")
+@app.get("/alerts/stop-loss", summary="即時停損預警查詢（JSON）")
 async def stop_loss_check():
-    """即時查詢停損預警 JSON（不推播）。"""
+    """即時查詢停損預警結果，回傳 JSON（不推播 Telegram）。"""
     result = await check_stop_loss()
     return result
 
 
-@app.get("/stop-loss", response_class=HTMLResponse)
+@app.get("/stop-loss", summary="停損預警儀表板（網頁）", response_class=HTMLResponse)
 async def stop_loss_page():
-    """停損預警 HTML 儀表板。"""
+    """停損預警 HTML 儀表板，直接瀏覽器開啟可視化顯示。"""
     now_str = datetime.datetime.now(_TZ8).strftime("%Y-%m-%d %H:%M")
     result  = await check_stop_loss()
     triggered = result.get("triggered", [])
@@ -329,8 +334,8 @@ a{{color:#38bdf8;text-decoration:none;font-size:13px}}
 </body></html>"""
 
 
-@app.get("/news/latest")
-async def latest_news(force: bool = False):
+@app.get("/news/latest", summary="最新新聞情緒分析")
+async def latest_news(force: bool = Query(False, description="True=強制重新抓取並呼叫 LLM，忽略快取")):
     """
     查詢新聞情緒（快取 1 小時）。
     ?force=true 可強制重新抓取並呼叫 LLM。
@@ -342,9 +347,9 @@ async def latest_news(force: bool = False):
     return {**result, "cache_age_seconds": cache_age}
 
 
-@app.get("/signal/latest")
+@app.get("/signal/latest", summary="最新空頭信號")
 async def latest_signal():
-    """取得最新信號。"""
+    """取得最近一次 9 維空頭信號計算結果。"""
     rows = await fetch_all("""
         SELECT * FROM bear_market_indicators
         ORDER BY signal_date DESC LIMIT 1
@@ -352,8 +357,8 @@ async def latest_signal():
     return rows[0] if rows else {}
 
 
-@app.get("/signal/history")
-async def signal_history(limit: int = 30):
+@app.get("/signal/history", summary="信號歷史記錄")
+async def signal_history(limit: int = Query(30, description="返回筆數（預設 30）")):
     return await fetch_all("""
         SELECT signal_date, total_score, signal_level,
                futures_net_short, usdtwd_rate, usdtwd_deprec_pct,
@@ -399,7 +404,7 @@ async def event_signal_analysis(days: int = 7):
     return {"correlations": rows, "period_days": days}
 
 
-@app.get("/dashboard", response_class=HTMLResponse)
+@app.get("/dashboard", summary="空頭信號儀表板（網頁）", response_class=HTMLResponse)
 async def dashboard():
     now_str = datetime.datetime.now(_TZ8).strftime("%Y-%m-%d %H:%M")
     rows = await fetch_all("""
