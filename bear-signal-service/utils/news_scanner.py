@@ -132,14 +132,22 @@ async def _llm_sentiment(articles: list[dict]) -> dict:
                 headers={
                     "Authorization": f"Bearer {OPENROUTER_API_KEY}",
                     "Content-Type": "application/json",
+                    "HTTP-Referer": "https://bear-signal.zeabur.app",
+                    "X-Title": "Bear Signal Service",
                 },
                 json={
-                    "model": "anthropic/claude-haiku-4-5",
+                    "model": "anthropic/claude-haiku-4-5-20251001",
                     "messages": [{"role": "user", "content": prompt}],
                     "max_tokens": 300,
                 },
             )
             data = resp.json()
+            # Handle API error responses (e.g. invalid key, quota, model not found)
+            if "error" in data:
+                err = data["error"]
+                raise Exception(err.get("message") or str(err))
+            if "choices" not in data:
+                raise Exception(f"Unexpected API response: {list(data.keys())}")
             content = data["choices"][0]["message"]["content"].strip()
             # 清理可能的 markdown code block
             if content.startswith("```"):
