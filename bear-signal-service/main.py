@@ -368,7 +368,7 @@ async def signal_history(limit: int = Query(30, description="返回筆數（預�
     """, limit)
 
 
-@app.get("/events/latest")
+@app.get("/events/latest", summary="最新黑天鵝／灰犀牛事件")
 async def latest_events(limit: int = 20, event_type: str = None):
     """查詢最新的黑天鵝/灰犀牛事件（P2.1 新增）。
 
@@ -390,7 +390,7 @@ async def latest_events(limit: int = 20, event_type: str = None):
     return {"events": rows, "count": len(rows)}
 
 
-@app.get("/events/signals")
+@app.get("/events/signals", summary="事件與空頭信號關聯分析")
 async def event_signal_analysis(days: int = 7):
     """查詢事件與信號的關聯分析（P2.1 新增視圖）。
 
