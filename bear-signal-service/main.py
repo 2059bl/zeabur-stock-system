@@ -16,6 +16,7 @@ import datetime
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Query
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
@@ -216,6 +217,12 @@ app = FastAPI(
     description="外資離場 9 維空頭信號 ＋ 產業輪動警示 ＋ 新聞情緒掃描 ＋ 停損預警",
     version=VERSION,
     lifespan=lifespan,
+)
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["GET", "POST"],
+    allow_headers=["*"],
 )
 
 

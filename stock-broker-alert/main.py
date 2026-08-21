@@ -9,6 +9,7 @@ from contextlib import asynccontextmanager
 from datetime import date
 
 from fastapi import FastAPI, Query, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import PlainTextResponse
 
 logging.basicConfig(
@@ -47,6 +48,12 @@ app = FastAPI(
     description="暴跌日帶血籌碼承接分析 ＋ 關鍵券商分點追蹤警報",
     version="1.0.0",
     lifespan=lifespan,
+)
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["GET", "POST"],
+    allow_headers=["*"],
 )
 
 
