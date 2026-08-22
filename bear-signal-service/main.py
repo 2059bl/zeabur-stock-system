@@ -34,7 +34,7 @@ logger    = logging.getLogger(__name__)
 scheduler = AsyncIOScheduler(timezone="Asia/Taipei")
 _TZ8      = datetime.timezone(datetime.timedelta(hours=8))
 
-VERSION = "1.2.0"
+VERSION = "1.2.1"
 
 _SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS bear_market_indicators (
