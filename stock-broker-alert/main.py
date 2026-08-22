@@ -46,7 +46,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="主力帶血承接警報系統",
     description="暴跌日帶血籌碼承接分析 ＋ 關鍵券商分點追蹤警報",
-    version="1.0.1",
+    version="1.0.2",
     lifespan=lifespan,
 )
 app.add_middleware(
