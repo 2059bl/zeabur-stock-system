@@ -10,7 +10,7 @@ from datetime import date
 
 from fastapi import FastAPI, Query, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import PlainTextResponse
+from fastapi.responses import PlainTextResponse, HTMLResponse
 
 logging.basicConfig(
     level=logging.INFO,
@@ -273,6 +273,159 @@ async def run_alerts_now():
     today = str(date.today())
     n = await run_daily_alerts(today)
     return {"status": "ok", "date": today, "alerts": n}
+
+
+@app.get("/dashboard", summary="主力儀表板（HTML）", response_class=HTMLResponse)
+async def dashboard():
+    """統一 HTML 儀表板：Broker Top20 + 帶血報告查詢"""
+    html = """<!doctype html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>主力帶血承接儀表板</title>
+<style>
+:root{--bg:#0e1117;--panel:#161b27;--card:#1c2236;--border:#2a3148;--ink:#e2e8f0;--muted:#64748b;--ok:#10b981;--warn:#f59e0b;--danger:#ef4444;--blue:#3b82f6}
+*{box-sizing:border-box;margin:0;padding:0}
+body{background:var(--bg);color:var(--ink);font-family:ui-sans-serif,system-ui,sans-serif;padding:20px}
+h1{font-size:18px;font-weight:700;margin-bottom:4px}
+.sub{font-size:12px;color:var(--muted);margin-bottom:20px}
+.tabs{display:flex;gap:8px;margin-bottom:16px}
+.tab{padding:8px 16px;border-radius:8px;background:var(--card);border:1px solid var(--border);cursor:pointer;font-size:13px;color:var(--muted)}
+.tab.active{background:var(--blue);color:#fff;border-color:var(--blue)}
+.pane{display:none}.pane.active{display:block}
+/* controls */
+.ctrl{display:flex;gap:10px;margin-bottom:12px;flex-wrap:wrap;align-items:center}
+.ctrl input,.ctrl select{background:var(--card);border:1px solid var(--border);color:var(--ink);border-radius:6px;padding:6px 10px;font-size:13px}
+.btn{padding:7px 14px;border-radius:6px;background:var(--blue);color:#fff;border:none;cursor:pointer;font-size:13px;font-weight:600}
+.btn:hover{opacity:.85}
+.btn-g{background:var(--ok)}
+/* table */
+.tbl-wrap{overflow-x:auto}
+table{width:100%;border-collapse:collapse;font-size:12px}
+th{background:var(--panel);color:var(--muted);text-align:left;padding:8px 10px;border-bottom:1px solid var(--border);white-space:nowrap;position:sticky;top:0}
+td{padding:7px 10px;border-bottom:1px solid var(--border);vertical-align:top;white-space:nowrap}
+tr:hover td{background:var(--panel)}
+.pill{display:inline-block;padding:2px 7px;border-radius:10px;font-size:10px;font-weight:700}
+.s90{background:color-mix(in srgb,var(--ok) 20%,transparent);color:var(--ok)}
+.s70{background:color-mix(in srgb,var(--warn) 20%,transparent);color:var(--warn)}
+.s50{background:color-mix(in srgb,var(--muted) 20%,transparent);color:var(--muted)}
+.tag-buy{background:color-mix(in srgb,var(--ok) 20%,transparent);color:var(--ok)}
+.tag-watch{background:color-mix(in srgb,var(--warn) 20%,transparent);color:var(--warn)}
+.tag-avoid{background:color-mix(in srgb,var(--danger) 20%,transparent);color:var(--danger)}
+.neg{color:var(--danger)}.pos{color:var(--ok)}
+.note{color:var(--muted);font-size:12px;padding:12px 0}
+</style>
+</head>
+<body>
+<h1>🎯 主力帶血承接警報系統</h1>
+<div class="sub">stock-broker-alert.zeabur.app</div>
+
+<div class="tabs">
+  <div class="tab active" onclick="switchTab('top20')">📊 主力排行 Top20</div>
+  <div class="tab" onclick="switchTab('report')">🩸 帶血報告</div>
+</div>
+
+<!-- Tab: Top20 -->
+<div class="pane active" id="pane-top20">
+  <div class="tbl-wrap"><table id="t20">
+    <thead><tr>
+      <th>#</th><th>券商代碼</th><th>券商名稱</th><th>評分</th>
+      <th>帶血次數</th><th>累計淨買(張)</th><th>最大吞噬率%</th>
+      <th>當沖風險</th><th>持股數</th>
+    </tr></thead>
+    <tbody id="t20-body"><tr><td colspan="9" class="note">載入中…</td></tr></tbody>
+  </table></div>
+</div>
+
+<!-- Tab: 帶血報告 -->
+<div class="pane" id="pane-report">
+  <div class="ctrl">
+    <input type="date" id="rpt-date" value="">
+    <select id="rpt-signal">
+      <option value="">全部信號</option>
+      <option value="STRONG_BUY">STRONG_BUY</option>
+      <option value="WATCH">WATCH</option>
+      <option value="AVOID">AVOID</option>
+    </select>
+    <button class="btn" onclick="loadReport()">查詢</button>
+  </div>
+  <div class="tbl-wrap"><table id="trpt">
+    <thead><tr>
+      <th>代號</th><th>名稱</th><th>族群</th><th>跌幅</th>
+      <th>成交量</th><th>融資</th><th>外資</th><th>投信</th><th>自營</th><th>公股</th>
+      <th>主承1</th><th>主承2</th><th>吞噬率%</th><th>評分</th><th>主力性質</th><th>信號</th>
+    </tr></thead>
+    <tbody id="trpt-body"><tr><td colspan="16" class="note">選擇日期後點查詢</td></tr></tbody>
+  </table></div>
+</div>
+
+<script>
+function switchTab(id){
+  document.querySelectorAll('.tab').forEach((t,i)=>t.classList.toggle('active',['top20','report'][i]===id));
+  document.querySelectorAll('.pane').forEach(p=>p.classList.remove('active'));
+  document.getElementById('pane-'+id).classList.add('active');
+}
+
+// default date: yesterday
+const d=new Date(); d.setDate(d.getDate()-1);
+document.getElementById('rpt-date').value=d.toISOString().slice(0,10);
+
+function scoreClass(s){return s>=90?'s90':s>=70?'s70':'s50'}
+function tagClass(t){return t==='STRONG_BUY'?'tag-buy':t==='WATCH'?'tag-watch':'tag-avoid'}
+function fmt(v,d=0){return v==null?'—':(+v).toLocaleString('zh-Hant',{maximumFractionDigits:d})}
+
+async function loadTop20(){
+  const r=await fetch('/broker/top20');
+  const j=await r.json();
+  const tb=document.getElementById('t20-body');
+  if(!j.data||!j.data.length){tb.innerHTML='<tr><td colspan="9" class="note">無資料</td></tr>';return}
+  tb.innerHTML=j.data.map((b,i)=>`<tr>
+    <td>${i+1}</td>
+    <td>${b.broker_code}</td>
+    <td>${b.broker_name||'—'}</td>
+    <td><span class="pill ${scoreClass(b.broker_score)}">${b.broker_score}</span></td>
+    <td>${b.blood_selling_count??'—'}</td>
+    <td class="${(b.total_net_buy||0)>=0?'pos':'neg'}">${fmt(b.total_net_buy)}</td>
+    <td>${fmt(b.max_absorption_ratio,1)}</td>
+    <td>${b.day_trade_risk||'—'}</td>
+    <td>${b.stock_count??'—'}</td>
+  </tr>`).join('');
+}
+
+async function loadReport(){
+  const dt=document.getElementById('rpt-date').value;
+  const sig=document.getElementById('rpt-signal').value;
+  if(!dt){alert('請選擇日期');return}
+  const tb=document.getElementById('trpt-body');
+  tb.innerHTML='<tr><td colspan="16" class="note">載入中…</td></tr>';
+  const url=`/blood-day/report?trade_date=${dt}`+(sig?`&signal=${sig}`:'');
+  const r=await fetch(url);
+  const j=await r.json();
+  if(!j.data||!j.data.length){tb.innerHTML='<tr><td colspan="16" class="note">無資料（該日期尚未分析）</td></tr>';return}
+  tb.innerHTML=j.data.map(r=>`<tr>
+    <td><b>${r.stock_code}</b></td>
+    <td>${r.stock_name||'—'}</td>
+    <td>${r.sector||'—'}</td>
+    <td class="neg">${fmt(r.change_pct,1)}%</td>
+    <td>${fmt(r.volume)}</td>
+    <td class="${(r.margin_change||0)<0?'neg':'pos'}">${(r.margin_change||0)<0?'洗出':'增加'}${fmt(Math.abs(r.margin_change||0))}</td>
+    <td class="${(r.foreign_net||0)>=0?'pos':'neg'}">${fmt(r.foreign_net)}</td>
+    <td class="${(r.trust_net||0)>=0?'pos':'neg'}">${fmt(r.trust_net)}</td>
+    <td class="${(r.dealer_net||0)>=0?'pos':'neg'}">${fmt(r.dealer_net)}</td>
+    <td>${fmt(r.gov_bank_net)}</td>
+    <td>${r.top_broker_1_name?r.top_broker_1_name+'('+fmt(r.top_broker_1_net)+')':'—'}</td>
+    <td>${r.top_broker_2_name?r.top_broker_2_name+'('+fmt(r.top_broker_2_net)+')':'—'}</td>
+    <td>${fmt(r.absorption_ratio,1)}</td>
+    <td>${fmt(r.absorption_score,1)}</td>
+    <td>${r.principal_type||'—'}</td>
+    <td><span class="pill ${tagClass(r.signal_tag)}">${r.signal_tag||'—'}</span></td>
+  </tr>`).join('');
+}
+
+loadTop20();
+</script>
+</body></html>"""
+    return HTMLResponse(content=html)
 
 
 if __name__ == "__main__":
